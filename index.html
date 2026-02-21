@@ -87,7 +87,8 @@
     const cameraHelpEl = document.getElementById("cameraHelp");
 
     let codeReader = null;
-    let manualReader = null;
+    let manualLinearReader = null;
+    let manualGeneralReader = null;
     let controls = null;
     let activeStream = null;
     let zxingLoadPromise = null;
@@ -344,13 +345,34 @@
       });
     }
 
-    function buildDecodeHints() {
+    function buildLinearDecodeHints() {
       const hints = new Map();
       const { DecodeHintType, BarcodeFormat } = window.ZXing;
 
       hints.set(DecodeHintType.TRY_HARDER, true);
       hints.set(DecodeHintType.ALSO_INVERTED, true);
 
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.CODE_39,
+        BarcodeFormat.CODE_93,
+        BarcodeFormat.CODABAR,
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.ITF,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E
+      ]);
+
+      return hints;
+    }
+
+    function buildGeneralDecodeHints() {
+      const hints = new Map();
+      const { DecodeHintType, BarcodeFormat } = window.ZXing;
+
+      hints.set(DecodeHintType.TRY_HARDER, true);
+      hints.set(DecodeHintType.ALSO_INVERTED, true);
       hints.set(DecodeHintType.POSSIBLE_FORMATS, [
         BarcodeFormat.QR_CODE,
         BarcodeFormat.DATA_MATRIX,
@@ -366,12 +388,11 @@
         BarcodeFormat.UPC_A,
         BarcodeFormat.UPC_E
       ]);
-
       return hints;
     }
 
     async function ensureCodeReader() {
-      if (codeReader && manualReader) return true;
+      if (codeReader && manualLinearReader && manualGeneralReader) return true;
 
       if (!zxingLoadPromise) {
         zxingLoadPromise = (async () => {
@@ -393,10 +414,13 @@
         return false;
       }
 
-      const hints = buildDecodeHints();
-      codeReader = new window.ZXing.BrowserMultiFormatReader(hints);
-      manualReader = new window.ZXing.MultiFormatReader();
-      manualReader.setHints(hints);
+      const linearHints = buildLinearDecodeHints();
+      const generalHints = buildGeneralDecodeHints();
+      codeReader = new window.ZXing.BrowserMultiFormatReader(generalHints);
+      manualLinearReader = new window.ZXing.MultiFormatReader();
+      manualLinearReader.setHints(linearHints);
+      manualGeneralReader = new window.ZXing.MultiFormatReader();
+      manualGeneralReader.setHints(generalHints);
       return true;
     }
 
@@ -467,38 +491,47 @@
       return { data: imageData.data, width: cw, height: ch };
     }
 
-    function decodeFrameData(frame) {
-      if (!manualReader || !frame) return null;
+    function decodeWithReader(reader, frame, binarizerCtor) {
+      if (!reader || !frame) return null;
       const source = new window.ZXing.RGBLuminanceSource(frame.data, frame.width, frame.height);
+      try {
+        const bitmap = new window.ZXing.BinaryBitmap(new binarizerCtor(source));
+        return reader.decode(bitmap);
+      } catch (e) {
+        return null;
+      } finally {
+        reader.reset();
+      }
+    }
 
-      const tryDecode = (binarizerCtor) => {
-        try {
-          const bitmap = new window.ZXing.BinaryBitmap(new binarizerCtor(source));
-          return manualReader.decode(bitmap);
-        } catch (e) {
-          return null;
-        } finally {
-          manualReader.reset();
-        }
-      };
+    function decodeFrameData(frame, preferLinearFirst) {
+      if (!frame) return null;
 
-      return (
-        tryDecode(window.ZXing.HybridBinarizer) ||
-        tryDecode(window.ZXing.GlobalHistogramBinarizer)
-      );
+      const readerOrder = preferLinearFirst
+        ? [manualLinearReader, manualGeneralReader]
+        : [manualGeneralReader, manualLinearReader];
+
+      for (const reader of readerOrder) {
+        const hybrid = decodeWithReader(reader, frame, window.ZXing.HybridBinarizer);
+        if (hybrid) return hybrid;
+        const hist = decodeWithReader(reader, frame, window.ZXing.GlobalHistogramBinarizer);
+        if (hist) return hist;
+      }
+
+      return null;
     }
 
     function tryManualDecodeAtAngle(angleDeg) {
-      if (!manualReader) return null;
+      if (!manualLinearReader || !manualGeneralReader) return null;
 
-      const preferredCrops =
-        angleDeg === 0 || angleDeg === 180
-          ? ["center-horizontal", "full", "center-vertical"]
-          : ["center-vertical", "full", "center-horizontal"];
+      const horizontalPriority = angleDeg === 0 || angleDeg === 180;
+      const preferredCrops = horizontalPriority
+        ? ["full", "center-horizontal", "center-vertical"]
+        : ["center-vertical", "full", "center-horizontal"];
 
       for (const cropMode of preferredCrops) {
         const frame = drawRotatedVideoFrame(angleDeg, cropMode);
-        const decoded = decodeFrameData(frame);
+        const decoded = decodeFrameData(frame, horizontalPriority);
         if (decoded) return decoded;
       }
 
@@ -506,7 +539,7 @@
     }
 
     async function runManualRotationAssist() {
-      if (!controls || !manualReader || manualDecodeBusy || !activeStream) return;
+      if (!controls || !manualLinearReader || !manualGeneralReader || manualDecodeBusy || !activeStream) return;
       if (!videoEl.videoWidth || !videoEl.videoHeight) return;
 
       manualDecodeBusy = true;
