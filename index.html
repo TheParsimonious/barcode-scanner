@@ -146,6 +146,8 @@
     const HORIZONTAL_TILT_ANGLES = [-8, 8, 172, 188];
     const MANUAL_DECODE_INTERVAL_MS = 280;
     const MANUAL_DECODE_INTERVAL_WITH_NATIVE_MS = 360;
+    const CAPTURE_SWEEP_STEP_DEG = 6;
+    const CAPTURE_PROGRESS_UPDATE_EVERY_DEG = 36;
     const manualCanvas = document.createElement("canvas");
     const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
     const nativeLaneCanvas = document.createElement("canvas");
@@ -245,6 +247,16 @@
       return canvas.toDataURL("image/jpeg", 0.72);
     }
 
+    function snapshotFromCanvas(canvas, quality = 0.82) {
+      if (!canvas || !canvas.width || !canvas.height) return null;
+      try {
+        return canvas.toDataURL("image/jpeg", quality);
+      } catch (e) {
+        console.warn("Failed to snapshot canvas", e);
+        return null;
+      }
+    }
+
     function shouldLogScan(text) {
       const now = Date.now();
       if (text === lastLoggedText && now - lastLoggedAt < 1800) {
@@ -255,14 +267,14 @@
       return true;
     }
 
-    function addHistoryItem(text, format) {
+    function addHistoryItem(text, format, snapshotOverride = null) {
       if (!shouldLogScan(text)) return;
 
       const item = {
         text,
         format,
         time: new Date().toISOString(),
-        snapshot: captureSnapshot()
+        snapshot: snapshotOverride || captureSnapshot()
       };
 
       scanHistory.unshift(item);
@@ -303,7 +315,7 @@
         : "All-codes mode enabled (QR + 1D).");
     }
 
-    function handleScanResult(result) {
+    function handleScanResult(result, snapshotOverride = null) {
       if (!result) return;
       const text = result.getText();
       const format = String(result.getBarcodeFormat());
@@ -311,17 +323,17 @@
       resultEl.textContent = text;
       copyBtn.disabled = false;
       setStatus(`Scanned: ${format}`);
-      addHistoryItem(text, format);
+      addHistoryItem(text, format, snapshotOverride);
 
       if (navigator.vibrate) navigator.vibrate(60);
     }
 
-    function handleScanValue(text, format) {
+    function handleScanValue(text, format, snapshotOverride = null) {
       if (!text) return;
       resultEl.textContent = text;
       copyBtn.disabled = false;
       setStatus(`Scanned: ${format || "UNKNOWN"}`);
-      addHistoryItem(text, format || "UNKNOWN");
+      addHistoryItem(text, format || "UNKNOWN", snapshotOverride);
       if (navigator.vibrate) navigator.vibrate(60);
     }
 
@@ -372,6 +384,19 @@
       return cardinalAngle
         ? ["center-horizontal", "lane-horizontal", "full", "center-vertical"]
         : ["full", "center-vertical", "center-horizontal"];
+    }
+
+    function getCaptureSweepAngles(stepDeg = CAPTURE_SWEEP_STEP_DEG) {
+      const step = Math.max(1, Math.floor(stepDeg));
+      const angles = [];
+      for (let angle = 0; angle < 360; angle += step) {
+        angles.push(angle);
+      }
+      return angles;
+    }
+
+    function yieldToUi() {
+      return new Promise((resolve) => setTimeout(resolve, 0));
     }
 
     function scaleFrameData(frame, scale) {
@@ -875,6 +900,7 @@
           setStatus("Could not capture frame. Try again.");
           return;
         }
+        const capturedSnapshot = snapshotFromCanvas(captureCanvas);
 
         // Try native detector first on still image.
         if (await ensureNativeDetector()) {
@@ -882,7 +908,7 @@
             const nativeHits = await nativeDetector.detect(captureCanvas);
             if (nativeHits && nativeHits.length) {
               const n = nativeHits[0];
-              handleScanValue(n.rawValue, String(n.format || "NATIVE"));
+              handleScanValue(n.rawValue, String(n.format || "NATIVE"), capturedSnapshot);
               setStatus("Captured decode succeeded.");
               return;
             }
@@ -895,11 +921,11 @@
           return;
         }
 
-        const angleOrder = linearOnlyMode
-          ? CARDINAL_ANGLES.concat(HORIZONTAL_TILT_ANGLES)
-          : CARDINAL_ANGLES;
-        const scaleOrder = [1, 1.35, 1.7];
+        const angleOrder = getCaptureSweepAngles();
         const cropOrderGeneral = ["full", "center-horizontal", "center-vertical"];
+        const scaleOrderHorizontal = [1, 1.35, 1.7];
+        const scaleOrderNonHorizontal = [1, 1.3];
+        const startTimeMs = Date.now();
 
         for (const angle of angleOrder) {
           const horizontalPriority = isHorizontalPriorityAngle(angle);
@@ -907,20 +933,28 @@
           const cropOrder = linearOnlyMode
             ? getLinearCropOrder(horizontalPriority, cardinalAngle)
             : cropOrderGeneral;
+          const scaleOrder = horizontalPriority ? scaleOrderHorizontal : scaleOrderNonHorizontal;
+
+          if (angle > 0 && angle % CAPTURE_PROGRESS_UPDATE_EVERY_DEG === 0) {
+            setStatus(`Capture decode sweep ${angle}°/360°...`);
+            await yieldToUi();
+          }
+
           for (const cropMode of cropOrder) {
             for (const scale of scaleOrder) {
               const frame = drawSnapshotRotatedFrame(angle, cropMode, scale);
               const result = decodeFrameData(frame, horizontalPriority);
               if (result) {
-                handleScanResult(result);
-                setStatus("Captured decode succeeded.");
+                handleScanResult(result, capturedSnapshot);
+                setStatus(`Captured decode succeeded at ${angle}°.`);
                 return;
               }
             }
           }
         }
 
-        setStatus("Capture decode failed. Keep barcode centered in lane and try 1.8x-2.3x zoom.");
+        const elapsed = ((Date.now() - startTimeMs) / 1000).toFixed(1);
+        setStatus(`No barcode detected after full 360° sweep (${elapsed}s).`);
       } finally {
         captureDecodeBusy = false;
         setRunning(scanningActive);
