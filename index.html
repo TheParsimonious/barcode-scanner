@@ -26,6 +26,9 @@
     .history-item { display: grid; grid-template-columns: 84px 1fr auto; gap: 10px; align-items: center; background: #fff; border-radius: 10px; padding: 8px; }
     .history-item img { width: 84px; height: 56px; object-fit: cover; border-radius: 8px; background: #111; }
     .history-empty { color: #555; font-size: 13px; }
+    .camera-tools { display: grid; gap: 10px; }
+    .zoom-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; }
+    .zoom-row input[type="range"] { width: 100%; }
   </style>
 </head>
 <body>
@@ -37,7 +40,17 @@
     <button class="primary" id="startBtn">Start scanning</button>
     <button class="secondary" id="stopBtn" disabled>Stop</button>
     <button class="secondary" id="copyBtn" disabled>Copy result</button>
+    <button class="secondary" id="focusBtn" disabled>Refocus</button>
     <button class="secondary" id="clearHistoryBtn">Clear history</button>
+  </div>
+
+  <div class="box camera-tools">
+    <div class="zoom-row">
+      <strong>Zoom</strong>
+      <input id="zoomSlider" type="range" min="1" max="1" step="0.1" value="1" disabled />
+      <span id="zoomValue" class="small">1.0x</span>
+    </div>
+    <div id="cameraHelp" class="small">Zoom and refocus are available when supported by your camera.</div>
   </div>
 
   <div class="box">
@@ -64,10 +77,14 @@
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const copyBtn = document.getElementById("copyBtn");
+    const focusBtn = document.getElementById("focusBtn");
     const clearHistoryBtn = document.getElementById("clearHistoryBtn");
     const resultEl = document.getElementById("result");
     const statusEl = document.getElementById("status");
     const historyListEl = document.getElementById("historyList");
+    const zoomSlider = document.getElementById("zoomSlider");
+    const zoomValueEl = document.getElementById("zoomValue");
+    const cameraHelpEl = document.getElementById("cameraHelp");
 
     let codeReader = null;
     let controls = null;
@@ -76,10 +93,14 @@
     let scanHistory = [];
     let lastLoggedText = "";
     let lastLoggedAt = 0;
+    let activeVideoTrack = null;
+    let zoomMin = 1;
+    let zoomMax = 1;
 
     function setRunning(running) {
       startBtn.disabled = running;
       stopBtn.disabled = !running;
+      focusBtn.disabled = !running || !activeVideoTrack;
     }
 
     function setStatus(msg) {
@@ -196,6 +217,92 @@
       setStatus("History cleared.");
     }
 
+    function setZoomUi(value) {
+      zoomValueEl.textContent = `${Number(value).toFixed(1)}x`;
+    }
+
+    function resetCameraControls() {
+      activeVideoTrack = null;
+      zoomMin = 1;
+      zoomMax = 1;
+      zoomSlider.min = "1";
+      zoomSlider.max = "1";
+      zoomSlider.step = "0.1";
+      zoomSlider.value = "1";
+      zoomSlider.disabled = true;
+      focusBtn.disabled = true;
+      setZoomUi(1);
+      cameraHelpEl.textContent = "Zoom and refocus are available when supported by your camera.";
+    }
+
+    async function applyZoom(zoomLevel) {
+      if (!activeVideoTrack) return;
+      try {
+        await activeVideoTrack.applyConstraints({ advanced: [{ zoom: zoomLevel }] });
+        setZoomUi(zoomLevel);
+      } catch (e) {
+        console.warn("Zoom apply failed", e);
+      }
+    }
+
+    async function requestRefocus() {
+      if (!activeVideoTrack) return;
+      try {
+        const caps = activeVideoTrack.getCapabilities ? activeVideoTrack.getCapabilities() : {};
+        if (caps.focusMode && caps.focusMode.includes("single-shot")) {
+          await activeVideoTrack.applyConstraints({ advanced: [{ focusMode: "single-shot" }] });
+          setStatus("Refocus requested.");
+          return;
+        }
+        if (caps.focusMode && caps.focusMode.includes("continuous")) {
+          await activeVideoTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          setStatus("Continuous focus enabled.");
+          return;
+        }
+        setStatus("Refocus is not supported on this camera.");
+      } catch (e) {
+        console.warn("Refocus failed", e);
+        setStatus("Refocus request failed.");
+      }
+    }
+
+    async function configureCameraControls(stream) {
+      const [track] = stream.getVideoTracks();
+      activeVideoTrack = track || null;
+      focusBtn.disabled = !activeVideoTrack;
+      if (!activeVideoTrack) return;
+
+      const caps = activeVideoTrack.getCapabilities ? activeVideoTrack.getCapabilities() : {};
+      const settings = activeVideoTrack.getSettings ? activeVideoTrack.getSettings() : {};
+
+      if (caps.focusMode && caps.focusMode.includes("continuous")) {
+        try {
+          await activeVideoTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+        } catch (e) {
+          console.warn("Continuous focus not applied", e);
+        }
+      }
+
+      if (caps.zoom) {
+        zoomMin = Number(caps.zoom.min ?? 1);
+        zoomMax = Number(caps.zoom.max ?? 1);
+        const step = Number(caps.zoom.step ?? 0.1);
+        const current = Number(settings.zoom ?? zoomMin);
+
+        zoomSlider.min = String(zoomMin);
+        zoomSlider.max = String(zoomMax);
+        zoomSlider.step = String(step);
+        zoomSlider.value = String(current);
+        zoomSlider.disabled = false;
+        setZoomUi(current);
+        cameraHelpEl.textContent = "Use zoom to fill more of the frame with the barcode for better reads.";
+      } else {
+        zoomSlider.disabled = true;
+        setZoomUi(1);
+        cameraHelpEl.textContent = "This camera does not expose zoom controls to the browser.";
+      }
+    }
+
     function loadScript(src) {
       return new Promise((resolve, reject) => {
         const existing = document.querySelector(`script[data-src='${src}']`);
@@ -288,8 +395,8 @@
 
     async function getCameraStream() {
       const attempts = [
-        { video: { facingMode: { exact: "environment" } }, audio: false },
-        { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+        { video: { facingMode: { exact: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: "continuous" }] }, audio: false },
+        { video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: "continuous" }] }, audio: false },
         { video: true, audio: false }
       ];
 
@@ -310,6 +417,7 @@
         activeStream = null;
       }
       videoEl.srcObject = null;
+      resetCameraControls();
     }
 
     function stopScanning() {
@@ -346,6 +454,7 @@
         activeStream = await getCameraStream();
         videoEl.srcObject = activeStream;
         await videoEl.play();
+        await configureCameraControls(activeStream);
 
         controls = await codeReader.decodeFromStream(activeStream, videoEl, (result) => {
           if (!result) return;
@@ -404,7 +513,14 @@
     startBtn.addEventListener("click", startScanning);
     stopBtn.addEventListener("click", stopScanning);
     copyBtn.addEventListener("click", copyResult);
+    focusBtn.addEventListener("click", requestRefocus);
     clearHistoryBtn.addEventListener("click", clearHistory);
+    zoomSlider.addEventListener("input", (event) => {
+      const value = Number(event.target.value);
+      if (!Number.isFinite(value)) return;
+      const clamped = Math.min(zoomMax, Math.max(zoomMin, value));
+      applyZoom(clamped);
+    });
     window.addEventListener("pagehide", stopScanning);
 
     if ("serviceWorker" in navigator) {
@@ -417,6 +533,7 @@
 
     loadHistory();
     renderHistory();
+    resetCameraControls();
   </script>
 </body>
 </html>
