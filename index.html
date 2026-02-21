@@ -47,6 +47,10 @@
     .small { color: #555; font-size: 12px; margin-top: 6px; }
     .history-list { display: grid; gap: 10px; }
     .history-item { display: grid; grid-template-columns: 84px 1fr auto; gap: 10px; align-items: center; background: #fff; border-radius: 10px; padding: 8px; }
+    .history-item.pending { border: 1px solid rgba(10, 132, 255, 0.35); }
+    .history-item.failed { border: 1px solid rgba(194, 112, 0, 0.35); }
+    .history-item.pending .mono { color: #0a84ff; }
+    .history-item.failed .mono { color: #a65f00; }
     .history-item img { width: 84px; height: 56px; object-fit: cover; border-radius: 8px; background: #111; }
     .history-empty { color: #555; font-size: 13px; }
     .camera-tools { display: grid; gap: 10px; }
@@ -147,7 +151,7 @@
     const MANUAL_DECODE_INTERVAL_MS = 280;
     const MANUAL_DECODE_INTERVAL_WITH_NATIVE_MS = 360;
     const CAPTURE_SWEEP_STEP_DEG = 6;
-    const CAPTURE_PROGRESS_UPDATE_EVERY_DEG = 36;
+    const CAPTURE_PROGRESS_UPDATE_EVERY_DEG = 6;
     const manualCanvas = document.createElement("canvas");
     const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
     const nativeLaneCanvas = document.createElement("canvas");
@@ -191,7 +195,19 @@
         if (!raw) return;
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return;
-        scanHistory = parsed.slice(0, HISTORY_LIMIT);
+        scanHistory = parsed
+          .slice(0, HISTORY_LIMIT)
+          .map((item) => {
+            if (!item || typeof item !== "object") return item;
+            if (!item.pending) return item;
+            return {
+              ...item,
+              pending: false,
+              failed: true,
+              text: item.text || "Capture interrupted.",
+              format: "INTERRUPTED"
+            };
+          });
       } catch (e) {
         console.warn("Failed to load history", e);
       }
@@ -213,21 +229,30 @@
 
       historyListEl.innerHTML = scanHistory
         .map((item, index) => {
-          const escapedText = escapeHtml(item.text || "");
-          const escapedFormat = escapeHtml(item.format || "Unknown");
+          const pending = !!item.pending;
+          const failed = !!item.failed;
+          const displayText = item.text || (pending ? "Photo captured. Decoding..." : "");
+          const escapedText = escapeHtml(displayText);
+          const escapedFormat = escapeHtml(item.format || (pending ? "PENDING" : "Unknown"));
           const escapedTime = escapeHtml(formatTime(item.time));
+          const rowClass = pending
+            ? "history-item pending"
+            : (failed ? "history-item failed" : "history-item");
+          const canCopy = !pending && !failed && !!item.text;
+          const copyText = pending ? "Working..." : "Copy";
+          const copyDisabled = canCopy ? "" : "disabled";
           const img = item.snapshot
             ? `<img src="${item.snapshot}" alt="Scan snapshot" />`
             : '<img alt="No snapshot" />';
 
           return `
-            <div class="history-item">
+            <div class="${rowClass}">
               ${img}
               <div>
                 <div class="mono">${escapedText}</div>
                 <div class="small">${escapedFormat} • ${escapedTime}</div>
               </div>
-              <button class="secondary history-copy" data-index="${index}">Copy</button>
+              <button class="secondary history-copy" data-index="${index}" ${copyDisabled}>${copyText}</button>
             </div>
           `;
         })
@@ -281,6 +306,63 @@
       scanHistory = scanHistory.slice(0, HISTORY_LIMIT);
       saveHistory();
       renderHistory();
+    }
+
+    function createHistoryItemId() {
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    function insertPendingCaptureHistoryItem(snapshotDataUrl) {
+      const item = {
+        id: createHistoryItemId(),
+        text: "Photo captured. Decoding...",
+        format: "PENDING",
+        time: new Date().toISOString(),
+        snapshot: snapshotDataUrl,
+        pending: true,
+        failed: false
+      };
+      scanHistory.unshift(item);
+      scanHistory = scanHistory.slice(0, HISTORY_LIMIT);
+      saveHistory();
+      renderHistory();
+      return item.id;
+    }
+
+    function updateHistoryItemById(itemId, updates) {
+      if (!itemId) return false;
+      const index = scanHistory.findIndex((item) => item && item.id === itemId);
+      if (index < 0) return false;
+      scanHistory[index] = { ...scanHistory[index], ...updates };
+      saveHistory();
+      renderHistory();
+      return true;
+    }
+
+    function resolvePendingCaptureSuccess(itemId, text, format, snapshotOverride = null) {
+      const applied = updateHistoryItemById(itemId, {
+        text,
+        format: format || "UNKNOWN",
+        time: new Date().toISOString(),
+        pending: false,
+        failed: false,
+        ...(snapshotOverride ? { snapshot: snapshotOverride } : {})
+      });
+      if (!applied) {
+        addHistoryItem(text, format || "UNKNOWN", snapshotOverride);
+      }
+      lastLoggedText = text;
+      lastLoggedAt = Date.now();
+    }
+
+    function resolvePendingCaptureFailure(itemId, message) {
+      updateHistoryItemById(itemId, {
+        text: message || "No barcode detected in capture.",
+        format: "NOT_FOUND",
+        time: new Date().toISOString(),
+        pending: false,
+        failed: true
+      });
     }
 
     function clearHistory() {
@@ -895,12 +977,16 @@
 
       captureDecodeBusy = true;
       setRunning(true);
+      let pendingHistoryId = null;
       try {
         if (!captureCurrentFrame()) {
           setStatus("Could not capture frame. Try again.");
           return;
         }
         const capturedSnapshot = snapshotFromCanvas(captureCanvas);
+        pendingHistoryId = insertPendingCaptureHistoryItem(capturedSnapshot);
+        setStatus("Photo captured. Starting decode sweep...");
+        await yieldToUi();
 
         // Try native detector first on still image.
         if (await ensureNativeDetector()) {
@@ -908,7 +994,11 @@
             const nativeHits = await nativeDetector.detect(captureCanvas);
             if (nativeHits && nativeHits.length) {
               const n = nativeHits[0];
-              handleScanValue(n.rawValue, String(n.format || "NATIVE"), capturedSnapshot);
+              const format = String(n.format || "NATIVE");
+              resultEl.textContent = n.rawValue;
+              copyBtn.disabled = false;
+              if (navigator.vibrate) navigator.vibrate(60);
+              resolvePendingCaptureSuccess(pendingHistoryId, n.rawValue, format, capturedSnapshot);
               setStatus("Captured decode succeeded.");
               return;
             }
@@ -918,6 +1008,7 @@
         }
 
         if (!(await ensureCodeReader())) {
+          resolvePendingCaptureFailure(pendingHistoryId, "Decoder unavailable.");
           return;
         }
 
@@ -935,7 +1026,7 @@
             : cropOrderGeneral;
           const scaleOrder = horizontalPriority ? scaleOrderHorizontal : scaleOrderNonHorizontal;
 
-          if (angle > 0 && angle % CAPTURE_PROGRESS_UPDATE_EVERY_DEG === 0) {
+          if (angle % CAPTURE_PROGRESS_UPDATE_EVERY_DEG === 0) {
             setStatus(`Capture decode sweep ${angle}°/360°...`);
             await yieldToUi();
           }
@@ -945,7 +1036,12 @@
               const frame = drawSnapshotRotatedFrame(angle, cropMode, scale);
               const result = decodeFrameData(frame, horizontalPriority);
               if (result) {
-                handleScanResult(result, capturedSnapshot);
+                const text = result.getText();
+                const format = String(result.getBarcodeFormat());
+                resultEl.textContent = text;
+                copyBtn.disabled = false;
+                if (navigator.vibrate) navigator.vibrate(60);
+                resolvePendingCaptureSuccess(pendingHistoryId, text, format, capturedSnapshot);
                 setStatus(`Captured decode succeeded at ${angle}°.`);
                 return;
               }
@@ -954,7 +1050,14 @@
         }
 
         const elapsed = ((Date.now() - startTimeMs) / 1000).toFixed(1);
+        resolvePendingCaptureFailure(pendingHistoryId, "No barcode detected in capture.");
         setStatus(`No barcode detected after full 360° sweep (${elapsed}s).`);
+      } catch (e) {
+        console.warn("Capture decode failed", e);
+        if (pendingHistoryId) {
+          resolvePendingCaptureFailure(pendingHistoryId, "Capture decode failed.");
+        }
+        setStatus("Capture decode failed unexpectedly.");
       } finally {
         captureDecodeBusy = false;
         setRunning(scanningActive);
@@ -1076,7 +1179,7 @@
 
     async function copyHistoryAtIndex(index) {
       const item = scanHistory[index];
-      if (!item || !item.text) return;
+      if (!item || !item.text || item.pending || item.failed) return;
 
       try {
         await navigator.clipboard.writeText(item.text);
