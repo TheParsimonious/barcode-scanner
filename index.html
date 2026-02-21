@@ -432,7 +432,7 @@
       throw lastError || new Error("Unable to access camera");
     }
 
-    function drawRotatedVideoFrame(angleDeg) {
+    function drawRotatedVideoFrame(angleDeg, cropMode = "full") {
       if (!manualCtx || !videoEl.videoWidth || !videoEl.videoHeight) return null;
       const vw = videoEl.videoWidth;
       const vh = videoEl.videoHeight;
@@ -449,24 +449,60 @@
       manualCtx.drawImage(videoEl, -vw / 2, -vh / 2, vw, vh);
       manualCtx.restore();
 
+      if (cropMode === "center-horizontal") {
+        const band = Math.max(80, Math.floor(ch * 0.38));
+        const y = Math.floor((ch - band) / 2);
+        const imageData = manualCtx.getImageData(0, y, cw, band);
+        return { data: imageData.data, width: cw, height: band };
+      }
+
+      if (cropMode === "center-vertical") {
+        const band = Math.max(80, Math.floor(cw * 0.38));
+        const x = Math.floor((cw - band) / 2);
+        const imageData = manualCtx.getImageData(x, 0, band, ch);
+        return { data: imageData.data, width: band, height: ch };
+      }
+
       const imageData = manualCtx.getImageData(0, 0, cw, ch);
       return { data: imageData.data, width: cw, height: ch };
     }
 
+    function decodeFrameData(frame) {
+      if (!manualReader || !frame) return null;
+      const source = new window.ZXing.RGBLuminanceSource(frame.data, frame.width, frame.height);
+
+      const tryDecode = (binarizerCtor) => {
+        try {
+          const bitmap = new window.ZXing.BinaryBitmap(new binarizerCtor(source));
+          return manualReader.decode(bitmap);
+        } catch (e) {
+          return null;
+        } finally {
+          manualReader.reset();
+        }
+      };
+
+      return (
+        tryDecode(window.ZXing.HybridBinarizer) ||
+        tryDecode(window.ZXing.GlobalHistogramBinarizer)
+      );
+    }
+
     function tryManualDecodeAtAngle(angleDeg) {
       if (!manualReader) return null;
-      const frame = drawRotatedVideoFrame(angleDeg);
-      if (!frame) return null;
 
-      const luminanceSource = new window.ZXing.RGBLuminanceSource(frame.data, frame.width, frame.height);
-      const binaryBitmap = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(luminanceSource));
-      try {
-        return manualReader.decode(binaryBitmap);
-      } catch (e) {
-        return null;
-      } finally {
-        manualReader.reset();
+      const preferredCrops =
+        angleDeg === 0 || angleDeg === 180
+          ? ["center-horizontal", "full", "center-vertical"]
+          : ["center-vertical", "full", "center-horizontal"];
+
+      for (const cropMode of preferredCrops) {
+        const frame = drawRotatedVideoFrame(angleDeg, cropMode);
+        const decoded = decodeFrameData(frame);
+        if (decoded) return decoded;
       }
+
+      return null;
     }
 
     async function runManualRotationAssist() {
@@ -475,7 +511,8 @@
 
       manualDecodeBusy = true;
       try {
-        const angles = [0, 90, 180, 270];
+        // Prioritize horizontal label orientations first (0/180), then vertical (90/270).
+        const angles = [0, 180, 90, 270];
         for (const angle of angles) {
           const result = tryManualDecodeAtAngle(angle);
           if (result) {
@@ -490,7 +527,7 @@
 
     function startManualRotationAssist() {
       stopManualRotationAssist();
-      manualDecodeTimer = setInterval(runManualRotationAssist, 450);
+      manualDecodeTimer = setInterval(runManualRotationAssist, 280);
     }
 
     function stopManualRotationAssist() {
