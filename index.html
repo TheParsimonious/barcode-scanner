@@ -371,8 +371,9 @@
 
       let frame;
       if (cropMode === "center-horizontal" || cropMode === "lane-horizontal" || cropMode === "lane-horizontal-narrow") {
-        const bandPct = cropMode === "lane-horizontal" ? LANE_HEIGHT_PCT : 0.38;
-        const topPct = cropMode === "lane-horizontal" ? LANE_TOP_PCT : (1 - bandPct) / 2;
+        const laneAligned = cropMode === "lane-horizontal" || cropMode === "lane-horizontal-narrow";
+        const bandPct = laneAligned ? LANE_HEIGHT_PCT : 0.38;
+        const topPct = laneAligned ? LANE_TOP_PCT : (1 - bandPct) / 2;
         const band = Math.max(80, Math.floor(ch * bandPct));
         const y = Math.max(0, Math.min(ch - band, Math.floor(ch * topPct)));
         if (cropMode === "lane-horizontal-narrow") {
@@ -683,8 +684,9 @@
       manualCtx.restore();
 
       if (cropMode === "center-horizontal" || cropMode === "lane-horizontal" || cropMode === "lane-horizontal-narrow") {
-        const bandPct = cropMode === "lane-horizontal" ? LANE_HEIGHT_PCT : 0.38;
-        const topPct = cropMode === "lane-horizontal" ? LANE_TOP_PCT : (1 - bandPct) / 2;
+        const laneAligned = cropMode === "lane-horizontal" || cropMode === "lane-horizontal-narrow";
+        const bandPct = laneAligned ? LANE_HEIGHT_PCT : 0.38;
+        const topPct = laneAligned ? LANE_TOP_PCT : (1 - bandPct) / 2;
         const band = Math.max(80, Math.floor(ch * bandPct));
         const y = Math.max(0, Math.min(ch - band, Math.floor(ch * topPct)));
 
@@ -744,11 +746,13 @@
       if (!manualLinearReader) return null;
 
       const horizontalPriority = angleDeg === 0 || angleDeg === 180;
-      const preferredCrops = horizontalPriority
-        ? (linearOnlyMode
-            ? ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full"]
-            : ["full", "center-horizontal", "center-vertical"])
-        : ["center-vertical", "full", "center-horizontal"];
+      const preferredCrops = linearOnlyMode
+        ? (horizontalPriority
+            ? ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full", "center-vertical"]
+            : ["center-horizontal", "lane-horizontal", "full", "center-vertical"])
+        : (horizontalPriority
+            ? ["full", "center-horizontal", "center-vertical"]
+            : ["center-vertical", "full", "center-horizontal"]);
 
       for (const cropMode of preferredCrops) {
         const frame = drawRotatedVideoFrame(angleDeg, cropMode);
@@ -765,8 +769,8 @@
 
       manualDecodeBusy = true;
       try {
-        // Linear mode: focus on horizontal orientations first.
-        const angles = linearOnlyMode ? [0, 180] : [0, 180, 90, 270];
+        // Keep horizontal-first ordering, but always test all quadrants.
+        const angles = [0, 180, 90, 270];
         for (const angle of angles) {
           const result = tryManualDecodeAtAngle(angle);
           if (result) {
@@ -850,14 +854,17 @@
           return;
         }
 
-        const angleOrder = linearOnlyMode ? [0, 180, 90, 270] : [0, 180, 90, 270];
+        const angleOrder = [0, 180, 90, 270];
         const scaleOrder = [1, 1.35, 1.7];
-        const cropOrderLinear = ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full", "center-vertical"];
+        const cropOrderLinearHorizontal = ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full", "center-vertical"];
+        const cropOrderLinearRotated = ["center-horizontal", "lane-horizontal", "full", "center-vertical"];
         const cropOrderGeneral = ["full", "center-horizontal", "center-vertical"];
 
         for (const angle of angleOrder) {
           const horizontalPriority = angle === 0 || angle === 180;
-          const cropOrder = linearOnlyMode && horizontalPriority ? cropOrderLinear : cropOrderGeneral;
+          const cropOrder = linearOnlyMode
+            ? (horizontalPriority ? cropOrderLinearHorizontal : cropOrderLinearRotated)
+            : cropOrderGeneral;
           for (const cropMode of cropOrder) {
             for (const scale of scaleOrder) {
               const frame = drawSnapshotRotatedFrame(angle, cropMode, scale);

@@ -1,4 +1,4 @@
-﻿const CACHE_NAME = "barcode-scanner-v18";
+const CACHE_NAME = "barcode-scanner-v19";
 const APP_SHELL = [
   "./",
   "./index.html",
