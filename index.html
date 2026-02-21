@@ -141,6 +141,10 @@
     let captureDecodeBusy = false;
     const LANE_TOP_PCT = 0.37;
     const LANE_HEIGHT_PCT = 0.26;
+    const CARDINAL_ANGLES = [0, 180, 90, 270];
+    const HORIZONTAL_TILT_ANGLES = [-8, 8, 172, 188];
+    const MANUAL_DECODE_INTERVAL_MS = 280;
+    const MANUAL_DECODE_INTERVAL_WITH_NATIVE_MS = 360;
     const manualCanvas = document.createElement("canvas");
     const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
     const nativeLaneCanvas = document.createElement("canvas");
@@ -333,18 +337,56 @@
       return { data: imageData.data, width: w, height: h };
     }
 
+    function normalizeAngle(angleDeg) {
+      return ((angleDeg % 360) + 360) % 360;
+    }
+
+    function isCardinalAngle(angleDeg) {
+      const a = normalizeAngle(angleDeg);
+      return a === 0 || a === 90 || a === 180 || a === 270;
+    }
+
+    function isHorizontalPriorityAngle(angleDeg) {
+      const a = normalizeAngle(angleDeg);
+      const d0 = Math.min(Math.abs(a), Math.abs(360 - a));
+      const d180 = Math.abs(a - 180);
+      return Math.min(d0, d180) <= 24;
+    }
+
+    function getRotatedBounds(width, height, angleDeg) {
+      const rad = (angleDeg * Math.PI) / 180;
+      const absCos = Math.abs(Math.cos(rad));
+      const absSin = Math.abs(Math.sin(rad));
+      const cw = Math.max(1, Math.round(width * absCos + height * absSin));
+      const ch = Math.max(1, Math.round(width * absSin + height * absCos));
+      return { cw, ch };
+    }
+
+    function getLinearCropOrder(horizontalPriority, cardinalAngle) {
+      if (horizontalPriority) {
+        return cardinalAngle
+          ? ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full", "center-vertical"]
+          : ["center-horizontal", "lane-horizontal", "full", "center-vertical"];
+      }
+      return cardinalAngle
+        ? ["center-horizontal", "lane-horizontal", "full", "center-vertical"]
+        : ["full", "center-vertical", "center-horizontal"];
+    }
+
     function scaleFrameData(frame, scale) {
       if (!frameScaleCtx || !frame || scale === 1) return frame;
       const sw = Math.max(32, Math.floor(frame.width * scale));
       const sh = Math.max(32, Math.floor(frame.height * scale));
       frameScaleCanvas.width = sw;
       frameScaleCanvas.height = sh;
+      frameScaleCtx.imageSmoothingEnabled = false;
 
       const srcCanvas = document.createElement("canvas");
       srcCanvas.width = frame.width;
       srcCanvas.height = frame.height;
       const srcCtx = srcCanvas.getContext("2d");
       if (!srcCtx) return frame;
+      srcCtx.imageSmoothingEnabled = false;
       srcCtx.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0);
 
       frameScaleCtx.clearRect(0, 0, sw, sh);
@@ -356,12 +398,11 @@
       if (!captureWorkCtx || !captureCanvas.width || !captureCanvas.height) return null;
       const vw = captureCanvas.width;
       const vh = captureCanvas.height;
-      const swap = angleDeg === 90 || angleDeg === 270;
-      const cw = swap ? vh : vw;
-      const ch = swap ? vw : vh;
+      const { cw, ch } = getRotatedBounds(vw, vh, angleDeg);
 
       captureWorkCanvas.width = cw;
       captureWorkCanvas.height = ch;
+      captureWorkCtx.imageSmoothingEnabled = false;
       captureWorkCtx.save();
       captureWorkCtx.clearRect(0, 0, cw, ch);
       captureWorkCtx.translate(cw / 2, ch / 2);
@@ -377,7 +418,7 @@
         const band = Math.max(80, Math.floor(ch * bandPct));
         const y = Math.max(0, Math.min(ch - band, Math.floor(ch * topPct)));
         if (cropMode === "lane-horizontal-narrow") {
-          const narrowW = Math.max(120, Math.floor(cw * 0.52));
+          const narrowW = Math.max(120, Math.floor(cw * 0.68));
           const x = Math.max(0, Math.floor((cw - narrowW) / 2));
           frame = frameFromCanvasArea(captureWorkCanvas, captureWorkCtx, x, y, narrowW, band);
         } else {
@@ -670,12 +711,11 @@
       if (!manualCtx || !videoEl.videoWidth || !videoEl.videoHeight) return null;
       const vw = videoEl.videoWidth;
       const vh = videoEl.videoHeight;
-      const swap = angleDeg === 90 || angleDeg === 270;
-      const cw = swap ? vh : vw;
-      const ch = swap ? vw : vh;
+      const { cw, ch } = getRotatedBounds(vw, vh, angleDeg);
 
       manualCanvas.width = cw;
       manualCanvas.height = ch;
+      manualCtx.imageSmoothingEnabled = false;
       manualCtx.save();
       manualCtx.clearRect(0, 0, cw, ch);
       manualCtx.translate(cw / 2, ch / 2);
@@ -691,7 +731,7 @@
         const y = Math.max(0, Math.min(ch - band, Math.floor(ch * topPct)));
 
         if (cropMode === "lane-horizontal-narrow") {
-          const narrowW = Math.max(120, Math.floor(cw * 0.52));
+          const narrowW = Math.max(120, Math.floor(cw * 0.68));
           const x = Math.max(0, Math.floor((cw - narrowW) / 2));
           const imageData = manualCtx.getImageData(x, y, narrowW, band);
           return { data: imageData.data, width: narrowW, height: band };
@@ -745,11 +785,10 @@
     function tryManualDecodeAtAngle(angleDeg) {
       if (!manualLinearReader) return null;
 
-      const horizontalPriority = angleDeg === 0 || angleDeg === 180;
+      const horizontalPriority = isHorizontalPriorityAngle(angleDeg);
+      const cardinalAngle = isCardinalAngle(angleDeg);
       const preferredCrops = linearOnlyMode
-        ? (horizontalPriority
-            ? ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full", "center-vertical"]
-            : ["center-horizontal", "lane-horizontal", "full", "center-vertical"])
+        ? getLinearCropOrder(horizontalPriority, cardinalAngle)
         : (horizontalPriority
             ? ["full", "center-horizontal", "center-vertical"]
             : ["center-vertical", "full", "center-horizontal"]);
@@ -769,8 +808,9 @@
 
       manualDecodeBusy = true;
       try {
-        // Keep horizontal-first ordering, but always test all quadrants.
-        const angles = [0, 180, 90, 270];
+        const angles = linearOnlyMode
+          ? CARDINAL_ANGLES.concat(HORIZONTAL_TILT_ANGLES)
+          : CARDINAL_ANGLES;
         for (const angle of angles) {
           const result = tryManualDecodeAtAngle(angle);
           if (result) {
@@ -793,7 +833,7 @@
           const vh = videoEl.videoHeight;
           const laneY = Math.max(0, Math.floor(vh * LANE_TOP_PCT));
           const laneH = Math.max(80, Math.min(vh - laneY, Math.floor(vh * LANE_HEIGHT_PCT)));
-          const laneW = Math.max(120, Math.floor(vw * 0.52));
+          const laneW = Math.max(120, Math.floor(vw * 0.68));
           const laneX = Math.max(0, Math.floor((vw - laneW) / 2));
           nativeLaneCanvas.width = laneW;
           nativeLaneCanvas.height = laneH;
@@ -854,16 +894,17 @@
           return;
         }
 
-        const angleOrder = [0, 180, 90, 270];
+        const angleOrder = linearOnlyMode
+          ? CARDINAL_ANGLES.concat(HORIZONTAL_TILT_ANGLES)
+          : CARDINAL_ANGLES;
         const scaleOrder = [1, 1.35, 1.7];
-        const cropOrderLinearHorizontal = ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full", "center-vertical"];
-        const cropOrderLinearRotated = ["center-horizontal", "lane-horizontal", "full", "center-vertical"];
         const cropOrderGeneral = ["full", "center-horizontal", "center-vertical"];
 
         for (const angle of angleOrder) {
-          const horizontalPriority = angle === 0 || angle === 180;
+          const horizontalPriority = isHorizontalPriorityAngle(angle);
+          const cardinalAngle = isCardinalAngle(angle);
           const cropOrder = linearOnlyMode
-            ? (horizontalPriority ? cropOrderLinearHorizontal : cropOrderLinearRotated)
+            ? getLinearCropOrder(horizontalPriority, cardinalAngle)
             : cropOrderGeneral;
           for (const cropMode of cropOrder) {
             for (const scale of scaleOrder) {
@@ -887,7 +928,7 @@
 
     function startManualRotationAssist() {
       stopManualRotationAssist();
-      manualDecodeTimer = setInterval(runManualRotationAssist, 280);
+      manualDecodeTimer = setInterval(runManualRotationAssist, MANUAL_DECODE_INTERVAL_MS);
     }
 
     function stopManualRotationAssist() {
@@ -972,7 +1013,7 @@
           startManualRotationAssist();
           if (manualDecodeTimer) {
             clearInterval(manualDecodeTimer);
-            manualDecodeTimer = setInterval(runManualRotationAssist, 520);
+            manualDecodeTimer = setInterval(runManualRotationAssist, MANUAL_DECODE_INTERVAL_WITH_NATIVE_MS);
           }
         }
         setStatus("Scanning... point camera at barcode/QR.");
