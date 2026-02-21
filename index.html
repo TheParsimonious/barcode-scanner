@@ -14,7 +14,30 @@
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
     h1 { font-size: 18px; margin: 0 0 12px; }
     h2 { font-size: 16px; margin: 0 0 10px; }
-    video { width: 100%; max-width: 520px; border-radius: 12px; background: #111; }
+    .preview-wrap { position: relative; width: 100%; max-width: 520px; }
+    .preview-wrap video { width: 100%; border-radius: 12px; background: #111; display: block; }
+    .scan-lane {
+      position: absolute;
+      left: 6%;
+      width: 88%;
+      top: 37%;
+      height: 26%;
+      border: 2px solid rgba(10, 132, 255, 0.95);
+      border-radius: 10px;
+      box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.14);
+      pointer-events: none;
+    }
+    .scan-lane-label {
+      position: absolute;
+      top: calc(37% - 24px);
+      left: 6%;
+      padding: 2px 8px;
+      font-size: 12px;
+      color: #fff;
+      background: rgba(10, 132, 255, 0.92);
+      border-radius: 999px;
+      pointer-events: none;
+    }
     .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     button { padding: 10px 12px; border-radius: 10px; border: 0; cursor: pointer; }
     button.primary { background: #0a84ff; color: white; }
@@ -34,7 +57,11 @@
 <body>
   <h1>My Barcode Scanner (No Ads)</h1>
 
-  <video id="preview" playsinline autoplay muted></video>
+  <div class="preview-wrap">
+    <video id="preview" playsinline autoplay muted></video>
+    <div id="scanLane" class="scan-lane"></div>
+    <div id="scanLaneLabel" class="scan-lane-label">Align barcode bars in this lane</div>
+  </div>
 
   <div class="row">
     <button class="primary" id="startBtn">Start scanning</button>
@@ -87,6 +114,8 @@
     const zoomSlider = document.getElementById("zoomSlider");
     const zoomValueEl = document.getElementById("zoomValue");
     const cameraHelpEl = document.getElementById("cameraHelp");
+    const scanLaneEl = document.getElementById("scanLane");
+    const scanLaneLabelEl = document.getElementById("scanLaneLabel");
 
     let codeReader = null;
     let manualLinearReader = null;
@@ -107,8 +136,12 @@
     let nativeDetectTimer = null;
     let nativeDetectBusy = false;
     let nativeFormatsKey = "";
+    const LANE_TOP_PCT = 0.37;
+    const LANE_HEIGHT_PCT = 0.26;
     const manualCanvas = document.createElement("canvas");
     const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
+    const nativeLaneCanvas = document.createElement("canvas");
+    const nativeLaneCtx = nativeLaneCanvas.getContext("2d");
 
     function setRunning(running) {
       startBtn.disabled = running;
@@ -239,6 +272,16 @@
       codeReader = null;
       manualLinearReader = null;
       manualGeneralReader = null;
+      nativeDetector = null;
+      nativeFormatsKey = "";
+      if (linearOnlyMode) {
+        scanLaneEl.style.display = "block";
+        scanLaneLabelEl.style.display = "block";
+        cameraHelpEl.textContent = "Linear mode: center the barcode inside the blue lane for best 0°/180° reads.";
+      } else {
+        scanLaneEl.style.display = "none";
+        scanLaneLabelEl.style.display = "none";
+      }
       updateModeButton();
       setStatus(linearOnlyMode
         ? "Linear-only mode enabled. Best for UPC/EAN/CODE barcodes."
@@ -282,7 +325,9 @@
       zoomSlider.disabled = true;
       focusBtn.disabled = true;
       setZoomUi(1);
-      cameraHelpEl.textContent = "Zoom and refocus are available when supported by your camera.";
+      cameraHelpEl.textContent = linearOnlyMode
+        ? "Linear mode: center the barcode inside the blue lane for best 0°/180° reads."
+        : "Zoom and refocus are available when supported by your camera.";
     }
 
     async function applyZoom(zoomLevel) {
@@ -345,11 +390,15 @@
         zoomSlider.value = String(current);
         zoomSlider.disabled = false;
         setZoomUi(current);
-        cameraHelpEl.textContent = "Use zoom to fill more of the frame with the barcode for better reads.";
+        cameraHelpEl.textContent = linearOnlyMode
+          ? "Use zoom and keep barcode bars inside the blue lane."
+          : "Use zoom to fill more of the frame with the barcode for better reads.";
       } else {
         zoomSlider.disabled = true;
         setZoomUi(1);
-        cameraHelpEl.textContent = "This camera does not expose zoom controls to the browser.";
+        cameraHelpEl.textContent = linearOnlyMode
+          ? "Keep barcode bars centered in the blue lane. This camera does not expose zoom."
+          : "This camera does not expose zoom controls to the browser.";
       }
     }
 
@@ -550,9 +599,11 @@
       manualCtx.drawImage(videoEl, -vw / 2, -vh / 2, vw, vh);
       manualCtx.restore();
 
-      if (cropMode === "center-horizontal") {
-        const band = Math.max(80, Math.floor(ch * 0.38));
-        const y = Math.floor((ch - band) / 2);
+      if (cropMode === "center-horizontal" || cropMode === "lane-horizontal") {
+        const bandPct = cropMode === "lane-horizontal" ? LANE_HEIGHT_PCT : 0.38;
+        const topPct = cropMode === "lane-horizontal" ? LANE_TOP_PCT : (1 - bandPct) / 2;
+        const band = Math.max(80, Math.floor(ch * bandPct));
+        const y = Math.max(0, Math.min(ch - band, Math.floor(ch * topPct)));
         const imageData = manualCtx.getImageData(0, y, cw, band);
         return { data: imageData.data, width: cw, height: band };
       }
@@ -603,7 +654,7 @@
 
       const horizontalPriority = angleDeg === 0 || angleDeg === 180;
       const preferredCrops = horizontalPriority
-        ? ["full", "center-horizontal", "center-vertical"]
+        ? (linearOnlyMode ? ["lane-horizontal", "center-horizontal", "full"] : ["full", "center-horizontal", "center-vertical"])
         : ["center-vertical", "full", "center-horizontal"];
 
       for (const cropMode of preferredCrops) {
@@ -621,8 +672,8 @@
 
       manualDecodeBusy = true;
       try {
-        // Prioritize horizontal label orientations first (0/180), then vertical (90/270).
-        const angles = [0, 180, 90, 270];
+        // Linear mode: focus on horizontal orientations first.
+        const angles = linearOnlyMode ? [0, 180] : [0, 180, 90, 270];
         for (const angle of angles) {
           const result = tryManualDecodeAtAngle(angle);
           if (result) {
@@ -640,10 +691,28 @@
       if (!videoEl.videoWidth || !videoEl.videoHeight) return;
       nativeDetectBusy = true;
       try {
+        if (linearOnlyMode && nativeLaneCtx) {
+          const vw = videoEl.videoWidth;
+          const vh = videoEl.videoHeight;
+          const laneY = Math.max(0, Math.floor(vh * LANE_TOP_PCT));
+          const laneH = Math.max(80, Math.min(vh - laneY, Math.floor(vh * LANE_HEIGHT_PCT)));
+          nativeLaneCanvas.width = vw;
+          nativeLaneCanvas.height = laneH;
+          nativeLaneCtx.clearRect(0, 0, vw, laneH);
+          nativeLaneCtx.drawImage(videoEl, 0, laneY, vw, laneH, 0, 0, vw, laneH);
+
+          const laneHits = await nativeDetector.detect(nativeLaneCanvas);
+          if (laneHits && laneHits.length) {
+            const first = laneHits[0];
+            handleScanValue(first.rawValue, String(first.format || "NATIVE"));
+            return;
+          }
+        }
+
         const hits = await nativeDetector.detect(videoEl);
         if (hits && hits.length) {
-          const first = hits[0];
-          handleScanValue(first.rawValue, String(first.format || "NATIVE"));
+          const firstFull = hits[0];
+          handleScanValue(firstFull.rawValue, String(firstFull.format || "NATIVE"));
         }
       } catch (e) {
         console.warn("Native detect pass failed", e);
