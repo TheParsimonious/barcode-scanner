@@ -53,13 +53,13 @@
     const startBtn = document.getElementById("startBtn");
     const testBtn = document.getElementById("testBtn");
     const diagBtn = document.getElementById("diagBtn");
-    const stopBtn  = document.getElementById("stopBtn");
-    const copyBtn  = document.getElementById("copyBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const copyBtn = document.getElementById("copyBtn");
     const resultEl = document.getElementById("result");
     const statusEl = document.getElementById("status");
     const diagEl = document.getElementById("diag");
 
-    const codeReader = new ZXing.BrowserMultiFormatReader();
+    let codeReader = null;
     let controls = null;
     let activeStream = null;
 
@@ -75,6 +75,21 @@
 
     function setDiag(lines) {
       diagEl.textContent = lines.join("\n");
+    }
+
+    function appendDiag(line) {
+      diagEl.textContent = `${diagEl.textContent}\n${line}`;
+    }
+
+    function ensureCodeReader() {
+      if (codeReader) return true;
+      if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
+        setStatus("Scanner library failed to load. Check connection, then reload page.");
+        appendDiag("ZXingLoaded: false");
+        return false;
+      }
+      codeReader = new window.ZXing.BrowserMultiFormatReader();
+      return true;
     }
 
     function formatCameraError(e) {
@@ -96,11 +111,12 @@
       lines.push(`URL: ${location.href}`);
       lines.push(`secureContext: ${window.isSecureContext}`);
       lines.push(`protocol: ${location.protocol}`);
-      lines.push(`standalone(matchMedia): ${window.matchMedia('(display-mode: standalone)').matches}`);
+      lines.push(`standalone(matchMedia): ${window.matchMedia("(display-mode: standalone)").matches}`);
       lines.push(`standalone(iOS): ${navigator.standalone === true}`);
       lines.push(`mediaDevices: ${!!navigator.mediaDevices}`);
       lines.push(`getUserMedia: ${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}`);
       lines.push(`permissionsAPI: ${!!navigator.permissions}`);
+      lines.push(`ZXingLoaded: ${!!(window.ZXing && window.ZXing.BrowserMultiFormatReader)}`);
 
       if (navigator.permissions && navigator.permissions.query) {
         try {
@@ -180,6 +196,11 @@
           return;
         }
 
+        if (!ensureCodeReader()) {
+          runDiagnostics();
+          return;
+        }
+
         setStatus("Requesting camera...");
         activeStream = await getCameraStream();
         videoEl.srcObject = activeStream;
@@ -219,7 +240,9 @@
           controls.stop();
           controls = null;
         }
-        codeReader.reset();
+        if (codeReader) {
+          codeReader.reset();
+        }
       } catch (e) {
         console.warn(e);
       }
@@ -240,6 +263,15 @@
       }
     }
 
+    window.addEventListener("error", (event) => {
+      appendDiag(`windowError: ${event.message}`);
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      const msg = event.reason && event.reason.message ? event.reason.message : String(event.reason);
+      appendDiag(`promiseRejection: ${msg}`);
+    });
+
     startBtn.addEventListener("click", startScanning);
     testBtn.addEventListener("click", startCameraPreviewOnly);
     diagBtn.addEventListener("click", runDiagnostics);
@@ -250,7 +282,7 @@
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("service-worker.js").catch((err) => {
-          console.warn("Service worker registration failed:", err);
+          appendDiag(`serviceWorkerError: ${err.message || err}`);
         });
       });
     }
