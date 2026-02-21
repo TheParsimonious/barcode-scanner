@@ -39,6 +39,7 @@
   <div class="row">
     <button class="primary" id="startBtn">Start scanning</button>
     <button class="secondary" id="stopBtn" disabled>Stop</button>
+    <button class="secondary" id="modeBtn">Mode: Linear only</button>
     <button class="secondary" id="copyBtn" disabled>Copy result</button>
     <button class="secondary" id="focusBtn" disabled>Refocus</button>
     <button class="secondary" id="clearHistoryBtn">Clear history</button>
@@ -76,6 +77,7 @@
     const videoEl = document.getElementById("preview");
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
+    const modeBtn = document.getElementById("modeBtn");
     const copyBtn = document.getElementById("copyBtn");
     const focusBtn = document.getElementById("focusBtn");
     const clearHistoryBtn = document.getElementById("clearHistoryBtn");
@@ -100,6 +102,7 @@
     let zoomMax = 1;
     let manualDecodeTimer = null;
     let manualDecodeBusy = false;
+    let linearOnlyMode = true;
     const manualCanvas = document.createElement("canvas");
     const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
 
@@ -221,6 +224,21 @@
       localStorage.removeItem(HISTORY_KEY);
       renderHistory();
       setStatus("History cleared.");
+    }
+
+    function updateModeButton() {
+      modeBtn.textContent = linearOnlyMode ? "Mode: Linear only" : "Mode: All codes";
+    }
+
+    function setDecoderMode(linearOnly) {
+      linearOnlyMode = !!linearOnly;
+      codeReader = null;
+      manualLinearReader = null;
+      manualGeneralReader = null;
+      updateModeButton();
+      setStatus(linearOnlyMode
+        ? "Linear-only mode enabled. Best for UPC/EAN/CODE barcodes."
+        : "All-codes mode enabled (QR + 1D).");
     }
 
     function handleScanResult(result) {
@@ -391,8 +409,12 @@
       return hints;
     }
 
+    function getActivePrimaryHints() {
+      return linearOnlyMode ? buildLinearDecodeHints() : buildGeneralDecodeHints();
+    }
+
     async function ensureCodeReader() {
-      if (codeReader && manualLinearReader && manualGeneralReader) return true;
+      if (codeReader && manualLinearReader && (linearOnlyMode || manualGeneralReader)) return true;
 
       if (!zxingLoadPromise) {
         zxingLoadPromise = (async () => {
@@ -415,12 +437,14 @@
       }
 
       const linearHints = buildLinearDecodeHints();
-      const generalHints = buildGeneralDecodeHints();
-      codeReader = new window.ZXing.BrowserMultiFormatReader(generalHints);
+      const primaryHints = getActivePrimaryHints();
+      codeReader = new window.ZXing.BrowserMultiFormatReader(primaryHints);
       manualLinearReader = new window.ZXing.MultiFormatReader();
       manualLinearReader.setHints(linearHints);
-      manualGeneralReader = new window.ZXing.MultiFormatReader();
-      manualGeneralReader.setHints(generalHints);
+      if (!linearOnlyMode) {
+        manualGeneralReader = new window.ZXing.MultiFormatReader();
+        manualGeneralReader.setHints(primaryHints);
+      }
       return true;
     }
 
@@ -522,7 +546,7 @@
     }
 
     function tryManualDecodeAtAngle(angleDeg) {
-      if (!manualLinearReader || !manualGeneralReader) return null;
+      if (!manualLinearReader) return null;
 
       const horizontalPriority = angleDeg === 0 || angleDeg === 180;
       const preferredCrops = horizontalPriority
@@ -539,7 +563,7 @@
     }
 
     async function runManualRotationAssist() {
-      if (!controls || !manualLinearReader || !manualGeneralReader || manualDecodeBusy || !activeStream) return;
+      if (!controls || !manualLinearReader || manualDecodeBusy || !activeStream) return;
       if (!videoEl.videoWidth || !videoEl.videoHeight) return;
 
       manualDecodeBusy = true;
@@ -665,6 +689,9 @@
 
     startBtn.addEventListener("click", startScanning);
     stopBtn.addEventListener("click", stopScanning);
+    modeBtn.addEventListener("click", () => {
+      setDecoderMode(!linearOnlyMode);
+    });
     copyBtn.addEventListener("click", copyResult);
     focusBtn.addEventListener("click", requestRefocus);
     clearHistoryBtn.addEventListener("click", clearHistory);
@@ -686,6 +713,7 @@
 
     loadHistory();
     renderHistory();
+    setDecoderMode(true);
     resetCameraControls();
   </script>
 </body>
