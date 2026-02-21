@@ -67,6 +67,7 @@
     <button class="primary" id="startBtn">Start scanning</button>
     <button class="secondary" id="stopBtn" disabled>Stop</button>
     <button class="secondary" id="modeBtn">Mode: Linear only</button>
+    <button class="secondary" id="snapDecodeBtn" disabled>Capture & decode</button>
     <button class="secondary" id="copyBtn" disabled>Copy result</button>
     <button class="secondary" id="focusBtn" disabled>Refocus</button>
     <button class="secondary" id="clearHistoryBtn">Clear history</button>
@@ -105,6 +106,7 @@
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const modeBtn = document.getElementById("modeBtn");
+    const snapDecodeBtn = document.getElementById("snapDecodeBtn");
     const copyBtn = document.getElementById("copyBtn");
     const focusBtn = document.getElementById("focusBtn");
     const clearHistoryBtn = document.getElementById("clearHistoryBtn");
@@ -136,16 +138,24 @@
     let nativeDetectTimer = null;
     let nativeDetectBusy = false;
     let nativeFormatsKey = "";
+    let captureDecodeBusy = false;
     const LANE_TOP_PCT = 0.37;
     const LANE_HEIGHT_PCT = 0.26;
     const manualCanvas = document.createElement("canvas");
     const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
     const nativeLaneCanvas = document.createElement("canvas");
     const nativeLaneCtx = nativeLaneCanvas.getContext("2d");
+    const captureCanvas = document.createElement("canvas");
+    const captureCtx = captureCanvas.getContext("2d");
+    const captureWorkCanvas = document.createElement("canvas");
+    const captureWorkCtx = captureWorkCanvas.getContext("2d");
+    const frameScaleCanvas = document.createElement("canvas");
+    const frameScaleCtx = frameScaleCanvas.getContext("2d");
 
     function setRunning(running) {
       startBtn.disabled = running;
       stopBtn.disabled = !running;
+      snapDecodeBtn.disabled = !running || captureDecodeBusy;
       focusBtn.disabled = !running || !activeVideoTrack;
     }
 
@@ -308,6 +318,79 @@
       setStatus(`Scanned: ${format || "UNKNOWN"}`);
       addHistoryItem(text, format || "UNKNOWN");
       if (navigator.vibrate) navigator.vibrate(60);
+    }
+
+    function captureCurrentFrame() {
+      if (!captureCtx || !videoEl.videoWidth || !videoEl.videoHeight) return false;
+      captureCanvas.width = videoEl.videoWidth;
+      captureCanvas.height = videoEl.videoHeight;
+      captureCtx.drawImage(videoEl, 0, 0, captureCanvas.width, captureCanvas.height);
+      return true;
+    }
+
+    function frameFromCanvasArea(canvas, ctx, x, y, w, h) {
+      const imageData = ctx.getImageData(x, y, w, h);
+      return { data: imageData.data, width: w, height: h };
+    }
+
+    function scaleFrameData(frame, scale) {
+      if (!frameScaleCtx || !frame || scale === 1) return frame;
+      const sw = Math.max(32, Math.floor(frame.width * scale));
+      const sh = Math.max(32, Math.floor(frame.height * scale));
+      frameScaleCanvas.width = sw;
+      frameScaleCanvas.height = sh;
+
+      const srcCanvas = document.createElement("canvas");
+      srcCanvas.width = frame.width;
+      srcCanvas.height = frame.height;
+      const srcCtx = srcCanvas.getContext("2d");
+      if (!srcCtx) return frame;
+      srcCtx.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0);
+
+      frameScaleCtx.clearRect(0, 0, sw, sh);
+      frameScaleCtx.drawImage(srcCanvas, 0, 0, sw, sh);
+      return frameFromCanvasArea(frameScaleCanvas, frameScaleCtx, 0, 0, sw, sh);
+    }
+
+    function drawSnapshotRotatedFrame(angleDeg, cropMode = "full", scale = 1) {
+      if (!captureWorkCtx || !captureCanvas.width || !captureCanvas.height) return null;
+      const vw = captureCanvas.width;
+      const vh = captureCanvas.height;
+      const swap = angleDeg === 90 || angleDeg === 270;
+      const cw = swap ? vh : vw;
+      const ch = swap ? vw : vh;
+
+      captureWorkCanvas.width = cw;
+      captureWorkCanvas.height = ch;
+      captureWorkCtx.save();
+      captureWorkCtx.clearRect(0, 0, cw, ch);
+      captureWorkCtx.translate(cw / 2, ch / 2);
+      captureWorkCtx.rotate((angleDeg * Math.PI) / 180);
+      captureWorkCtx.drawImage(captureCanvas, -vw / 2, -vh / 2, vw, vh);
+      captureWorkCtx.restore();
+
+      let frame;
+      if (cropMode === "center-horizontal" || cropMode === "lane-horizontal" || cropMode === "lane-horizontal-narrow") {
+        const bandPct = cropMode === "lane-horizontal" ? LANE_HEIGHT_PCT : 0.38;
+        const topPct = cropMode === "lane-horizontal" ? LANE_TOP_PCT : (1 - bandPct) / 2;
+        const band = Math.max(80, Math.floor(ch * bandPct));
+        const y = Math.max(0, Math.min(ch - band, Math.floor(ch * topPct)));
+        if (cropMode === "lane-horizontal-narrow") {
+          const narrowW = Math.max(120, Math.floor(cw * 0.52));
+          const x = Math.max(0, Math.floor((cw - narrowW) / 2));
+          frame = frameFromCanvasArea(captureWorkCanvas, captureWorkCtx, x, y, narrowW, band);
+        } else {
+          frame = frameFromCanvasArea(captureWorkCanvas, captureWorkCtx, 0, y, cw, band);
+        }
+      } else if (cropMode === "center-vertical") {
+        const band = Math.max(80, Math.floor(cw * 0.38));
+        const x = Math.floor((cw - band) / 2);
+        frame = frameFromCanvasArea(captureWorkCanvas, captureWorkCtx, x, 0, band, ch);
+      } else {
+        frame = frameFromCanvasArea(captureWorkCanvas, captureWorkCtx, 0, 0, cw, ch);
+      }
+
+      return scaleFrameData(frame, scale);
     }
 
     function setZoomUi(value) {
@@ -733,6 +816,68 @@
       }
     }
 
+    async function runCaptureDecode() {
+      if (captureDecodeBusy) return;
+      if (!activeStream || !videoEl.videoWidth || !videoEl.videoHeight) {
+        setStatus("Start scanning first, then tap Capture & decode.");
+        return;
+      }
+
+      captureDecodeBusy = true;
+      setRunning(true);
+      try {
+        if (!captureCurrentFrame()) {
+          setStatus("Could not capture frame. Try again.");
+          return;
+        }
+
+        // Try native detector first on still image.
+        if (await ensureNativeDetector()) {
+          try {
+            const nativeHits = await nativeDetector.detect(captureCanvas);
+            if (nativeHits && nativeHits.length) {
+              const n = nativeHits[0];
+              handleScanValue(n.rawValue, String(n.format || "NATIVE"));
+              setStatus("Captured decode succeeded.");
+              return;
+            }
+          } catch (e) {
+            console.warn("Native still detect failed", e);
+          }
+        }
+
+        if (!(await ensureCodeReader())) {
+          return;
+        }
+
+        const angleOrder = linearOnlyMode ? [0, 180, 90, 270] : [0, 180, 90, 270];
+        const scaleOrder = [1, 1.35, 1.7];
+        const cropOrderLinear = ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full", "center-vertical"];
+        const cropOrderGeneral = ["full", "center-horizontal", "center-vertical"];
+
+        for (const angle of angleOrder) {
+          const horizontalPriority = angle === 0 || angle === 180;
+          const cropOrder = linearOnlyMode && horizontalPriority ? cropOrderLinear : cropOrderGeneral;
+          for (const cropMode of cropOrder) {
+            for (const scale of scaleOrder) {
+              const frame = drawSnapshotRotatedFrame(angle, cropMode, scale);
+              const result = decodeFrameData(frame, horizontalPriority);
+              if (result) {
+                handleScanResult(result);
+                setStatus("Captured decode succeeded.");
+                return;
+              }
+            }
+          }
+        }
+
+        setStatus("Capture decode failed. Keep barcode centered in lane and try 1.8x-2.3x zoom.");
+      } finally {
+        captureDecodeBusy = false;
+        setRunning(!!controls);
+      }
+    }
+
     function startManualRotationAssist() {
       stopManualRotationAssist();
       manualDecodeTimer = setInterval(runManualRotationAssist, 280);
@@ -868,6 +1013,7 @@
     modeBtn.addEventListener("click", () => {
       setDecoderMode(!linearOnlyMode);
     });
+    snapDecodeBtn.addEventListener("click", runCaptureDecode);
     copyBtn.addEventListener("click", copyResult);
     focusBtn.addEventListener("click", requestRefocus);
     clearHistoryBtn.addEventListener("click", clearHistory);
