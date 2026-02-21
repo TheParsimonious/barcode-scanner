@@ -13,6 +13,7 @@
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
     h1 { font-size: 18px; margin: 0 0 12px; }
+    h2 { font-size: 16px; margin: 0 0 10px; }
     video { width: 100%; max-width: 520px; border-radius: 12px; background: #111; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     button { padding: 10px 12px; border-radius: 10px; border: 0; cursor: pointer; }
@@ -21,6 +22,10 @@
     .box { margin-top: 12px; padding: 12px; border-radius: 12px; background: #f2f2f7; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
     .small { color: #555; font-size: 12px; margin-top: 6px; }
+    .history-list { display: grid; gap: 10px; }
+    .history-item { display: grid; grid-template-columns: 84px 1fr auto; gap: 10px; align-items: center; background: #fff; border-radius: 10px; padding: 8px; }
+    .history-item img { width: 84px; height: 56px; object-fit: cover; border-radius: 8px; background: #111; }
+    .history-empty { color: #555; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -32,6 +37,7 @@
     <button class="primary" id="startBtn">Start scanning</button>
     <button class="secondary" id="stopBtn" disabled>Stop</button>
     <button class="secondary" id="copyBtn" disabled>Copy result</button>
+    <button class="secondary" id="clearHistoryBtn">Clear history</button>
   </div>
 
   <div class="box">
@@ -40,23 +46,36 @@
     <div id="status" class="small">Tip: use good light and hold steady.</div>
   </div>
 
+  <div class="box">
+    <h2>Recent scans</h2>
+    <div id="historyList" class="history-list"></div>
+  </div>
+
   <script>
     const ZXING_CDNS = [
       "https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0",
       "https://unpkg.com/@zxing/library@0.20.0"
     ];
 
+    const HISTORY_KEY = "barcodeScanHistoryV1";
+    const HISTORY_LIMIT = 3;
+
     const videoEl = document.getElementById("preview");
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const copyBtn = document.getElementById("copyBtn");
+    const clearHistoryBtn = document.getElementById("clearHistoryBtn");
     const resultEl = document.getElementById("result");
     const statusEl = document.getElementById("status");
+    const historyListEl = document.getElementById("historyList");
 
     let codeReader = null;
     let controls = null;
     let activeStream = null;
     let zxingLoadPromise = null;
+    let scanHistory = [];
+    let lastLoggedText = "";
+    let lastLoggedAt = 0;
 
     function setRunning(running) {
       startBtn.disabled = running;
@@ -65,6 +84,116 @@
 
     function setStatus(msg) {
       statusEl.textContent = msg;
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function formatTime(isoTime) {
+      const d = new Date(isoTime);
+      if (Number.isNaN(d.getTime())) return "Unknown time";
+      return d.toLocaleString();
+    }
+
+    function loadHistory() {
+      try {
+        const raw = localStorage.getItem(HISTORY_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return;
+        scanHistory = parsed.slice(0, HISTORY_LIMIT);
+      } catch (e) {
+        console.warn("Failed to load history", e);
+      }
+    }
+
+    function saveHistory() {
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(scanHistory.slice(0, HISTORY_LIMIT)));
+      } catch (e) {
+        console.warn("Failed to save history", e);
+      }
+    }
+
+    function renderHistory() {
+      if (!scanHistory.length) {
+        historyListEl.innerHTML = '<div class="history-empty">No scans yet.</div>';
+        return;
+      }
+
+      historyListEl.innerHTML = scanHistory
+        .map((item, index) => {
+          const escapedText = escapeHtml(item.text || "");
+          const escapedFormat = escapeHtml(item.format || "Unknown");
+          const escapedTime = escapeHtml(formatTime(item.time));
+          const img = item.snapshot
+            ? `<img src="${item.snapshot}" alt="Scan snapshot" />`
+            : '<img alt="No snapshot" />';
+
+          return `
+            <div class="history-item">
+              ${img}
+              <div>
+                <div class="mono">${escapedText}</div>
+                <div class="small">${escapedFormat} • ${escapedTime}</div>
+              </div>
+              <button class="secondary history-copy" data-index="${index}">Copy</button>
+            </div>
+          `;
+        })
+        .join("");
+    }
+
+    function captureSnapshot() {
+      if (!videoEl.videoWidth || !videoEl.videoHeight) return null;
+
+      const canvas = document.createElement("canvas");
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/jpeg", 0.72);
+    }
+
+    function shouldLogScan(text) {
+      const now = Date.now();
+      if (text === lastLoggedText && now - lastLoggedAt < 1800) {
+        return false;
+      }
+      lastLoggedText = text;
+      lastLoggedAt = now;
+      return true;
+    }
+
+    function addHistoryItem(text, format) {
+      if (!shouldLogScan(text)) return;
+
+      const item = {
+        text,
+        format,
+        time: new Date().toISOString(),
+        snapshot: captureSnapshot()
+      };
+
+      scanHistory.unshift(item);
+      scanHistory = scanHistory.slice(0, HISTORY_LIMIT);
+      saveHistory();
+      renderHistory();
+    }
+
+    function clearHistory() {
+      scanHistory = [];
+      localStorage.removeItem(HISTORY_KEY);
+      renderHistory();
+      setStatus("History cleared.");
     }
 
     function loadScript(src) {
@@ -195,9 +324,13 @@
         controls = await codeReader.decodeFromStream(activeStream, videoEl, (result) => {
           if (!result) return;
           const text = result.getText();
+          const format = String(result.getBarcodeFormat());
+
           resultEl.textContent = text;
           copyBtn.disabled = false;
-          setStatus(`Scanned: ${result.getBarcodeFormat()}`);
+          setStatus(`Scanned: ${format}`);
+          addHistoryItem(text, format);
+
           if (navigator.vibrate) navigator.vibrate(60);
         });
 
@@ -222,9 +355,30 @@
       }
     }
 
+    async function copyHistoryAtIndex(index) {
+      const item = scanHistory[index];
+      if (!item || !item.text) return;
+
+      try {
+        await navigator.clipboard.writeText(item.text);
+        setStatus("Copied from history.");
+      } catch {
+        setStatus("Copy failed. You can tap and hold to select text.");
+      }
+    }
+
+    historyListEl.addEventListener("click", (event) => {
+      const btn = event.target.closest(".history-copy");
+      if (!btn) return;
+      const idx = Number(btn.dataset.index);
+      if (!Number.isInteger(idx)) return;
+      copyHistoryAtIndex(idx);
+    });
+
     startBtn.addEventListener("click", startScanning);
     stopBtn.addEventListener("click", stopScanning);
     copyBtn.addEventListener("click", copyResult);
+    clearHistoryBtn.addEventListener("click", clearHistory);
     window.addEventListener("pagehide", stopScanning);
 
     if ("serviceWorker" in navigator) {
@@ -234,6 +388,9 @@
         });
       });
     }
+
+    loadHistory();
+    renderHistory();
   </script>
 </body>
 </html>
