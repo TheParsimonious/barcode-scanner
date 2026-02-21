@@ -11,7 +11,6 @@
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <title>My Barcode Scanner</title>
   <style>
-    /* Basic, clean layout */
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
     h1 { font-size: 18px; margin: 0 0 12px; }
     video { width: 100%; max-width: 520px; border-radius: 12px; background: #111; }
@@ -27,11 +26,12 @@
 <body>
   <h1>My Barcode Scanner (No Ads)</h1>
 
-  <!-- Camera preview -->
   <video id="preview" playsinline autoplay muted></video>
 
   <div class="row">
     <button class="primary" id="startBtn">Start scanning</button>
+    <button class="secondary" id="testBtn">Test camera only</button>
+    <button class="secondary" id="diagBtn">Run diagnostics</button>
     <button class="secondary" id="stopBtn" disabled>Stop</button>
     <button class="secondary" id="copyBtn" disabled>Copy result</button>
   </div>
@@ -42,121 +42,192 @@
     <div id="status" class="small">Tip: use good light and hold steady.</div>
   </div>
 
-  <!-- ZXing browser bundle -->
+  <div class="box">
+    <div><strong>Diagnostics:</strong></div>
+    <pre id="diag" class="mono small">Tap "Run diagnostics".</pre>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0"></script>
   <script>
-    // Elements
     const videoEl = document.getElementById("preview");
     const startBtn = document.getElementById("startBtn");
+    const testBtn = document.getElementById("testBtn");
+    const diagBtn = document.getElementById("diagBtn");
     const stopBtn  = document.getElementById("stopBtn");
     const copyBtn  = document.getElementById("copyBtn");
     const resultEl = document.getElementById("result");
     const statusEl = document.getElementById("status");
+    const diagEl = document.getElementById("diag");
 
-    // ZXing setup
     const codeReader = new ZXing.BrowserMultiFormatReader();
-    let controls = null; // Will hold the running scanner controls
+    let controls = null;
+    let activeStream = null;
 
-    // Helper: set UI states
     function setRunning(running) {
       startBtn.disabled = running;
+      testBtn.disabled = running;
       stopBtn.disabled = !running;
     }
 
-    // Helper: show status text
     function setStatus(msg) {
       statusEl.textContent = msg;
+    }
+
+    function setDiag(lines) {
+      diagEl.textContent = lines.join("\n");
     }
 
     function formatCameraError(e) {
       const name = e && e.name ? e.name : "UnknownError";
       if (name === "NotAllowedError" || name === "SecurityError") {
-        return "Camera permission denied. Enable camera for this site in iPhone Settings > Safari > Camera, then reload.";
+        return "Permission denied or blocked. In Safari, tap aA > Website Settings > Camera > Allow, then reload.";
       }
       if (name === "NotFoundError" || name === "OverconstrainedError") {
-        return "No usable camera found with current settings. Try again or reload the page.";
+        return "No usable camera found with current settings.";
       }
       if (name === "NotReadableError") {
-        return "Camera is in use by another app/tab. Close other camera apps and try again.";
+        return "Camera is already in use by another app/tab.";
       }
-      return "Camera error. Make sure this page is HTTPS and camera access is allowed.";
+      return `Camera error: ${name}`;
     }
 
-    async function startWithConstraints(constraints) {
-      return codeReader.decodeFromConstraints(constraints, videoEl, (result) => {
-        if (!result) return;
-        const text = result.getText();
-        resultEl.textContent = text;
-        copyBtn.disabled = false;
-        setStatus(`Scanned: ${result.getBarcodeFormat()}`);
+    async function runDiagnostics() {
+      const lines = [];
+      lines.push(`URL: ${location.href}`);
+      lines.push(`secureContext: ${window.isSecureContext}`);
+      lines.push(`protocol: ${location.protocol}`);
+      lines.push(`standalone(matchMedia): ${window.matchMedia('(display-mode: standalone)').matches}`);
+      lines.push(`standalone(iOS): ${navigator.standalone === true}`);
+      lines.push(`mediaDevices: ${!!navigator.mediaDevices}`);
+      lines.push(`getUserMedia: ${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}`);
+      lines.push(`permissionsAPI: ${!!navigator.permissions}`);
 
-        if (navigator.vibrate) navigator.vibrate(60);
-      });
+      if (navigator.permissions && navigator.permissions.query) {
+        try {
+          const p = await navigator.permissions.query({ name: "camera" });
+          lines.push(`cameraPermissionState: ${p.state}`);
+        } catch {
+          lines.push("cameraPermissionState: unsupported");
+        }
+      }
+
+      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const cams = devices.filter((d) => d.kind === "videoinput");
+          lines.push(`videoInputs: ${cams.length}`);
+          for (let i = 0; i < cams.length; i += 1) {
+            const label = cams[i].label || "(label hidden until permission granted)";
+            lines.push(`- cam${i + 1}: ${label}`);
+          }
+        } catch (e) {
+          lines.push(`enumerateDevicesError: ${e.name || "unknown"}`);
+        }
+      }
+
+      setDiag(lines);
     }
 
-    // Start scanning
+    async function getCameraStream() {
+      const attempts = [
+        { video: { facingMode: { exact: "environment" } }, audio: false },
+        { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+        { video: true, audio: false }
+      ];
+
+      let lastError = null;
+      for (const constraints of attempts) {
+        try {
+          return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (e) {
+          lastError = e;
+        }
+      }
+      throw lastError || new Error("Unable to access camera");
+    }
+
+    async function startCameraPreviewOnly() {
+      try {
+        stopScanning();
+
+        if (!window.isSecureContext) {
+          setStatus("Camera requires HTTPS. Open your GitHub Pages URL.");
+          return;
+        }
+
+        setStatus("Requesting camera for preview...");
+        activeStream = await getCameraStream();
+        videoEl.srcObject = activeStream;
+        await videoEl.play();
+
+        setRunning(true);
+        setStatus("Camera preview active (no scanning). If this works, issue is in scanner layer.");
+        runDiagnostics();
+      } catch (e) {
+        console.error(e);
+        setRunning(false);
+        setStatus(formatCameraError(e));
+        runDiagnostics();
+      }
+    }
+
     async function startScanning() {
       try {
         stopScanning();
 
         if (!window.isSecureContext) {
-          setStatus("Camera requires HTTPS. Open your GitHub Pages URL (not a local file).");
-          return;
-        }
-
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          setStatus("This browser does not support camera access from web apps.");
+          setStatus("Camera requires HTTPS. Open your GitHub Pages URL.");
           return;
         }
 
         setStatus("Requesting camera...");
+        activeStream = await getCameraStream();
+        videoEl.srcObject = activeStream;
+        await videoEl.play();
 
-        // iPhone-safe fallback sequence: strict rear -> ideal rear -> any camera.
-        const attempts = [
-          { video: { facingMode: { exact: "environment" } }, audio: false },
-          { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
-          { video: true, audio: false }
-        ];
-
-        let lastError = null;
-        for (const constraints of attempts) {
-          try {
-            controls = await startWithConstraints(constraints);
-            break;
-          } catch (e) {
-            lastError = e;
-          }
-        }
-
-        if (!controls) {
-          throw lastError || new Error("Unable to start scanner");
-        }
+        controls = await codeReader.decodeFromStream(activeStream, videoEl, (result) => {
+          if (!result) return;
+          const text = result.getText();
+          resultEl.textContent = text;
+          copyBtn.disabled = false;
+          setStatus(`Scanned: ${result.getBarcodeFormat()}`);
+          if (navigator.vibrate) navigator.vibrate(60);
+        });
 
         setRunning(true);
         setStatus("Scanning... point camera at barcode/QR.");
+        runDiagnostics();
       } catch (e) {
         console.error(e);
         setRunning(false);
         setStatus(formatCameraError(e));
+        runDiagnostics();
       }
     }
 
-    // Stop scanning
+    function stopTracks() {
+      if (activeStream) {
+        activeStream.getTracks().forEach((t) => t.stop());
+        activeStream = null;
+      }
+      videoEl.srcObject = null;
+    }
+
     function stopScanning() {
       try {
         if (controls) {
-          controls.stop(); // Stops camera + scanning loop
+          controls.stop();
           controls = null;
         }
         codeReader.reset();
       } catch (e) {
         console.warn(e);
       }
+      stopTracks();
       setRunning(false);
       setStatus("Stopped.");
     }
 
-    // Copy result
     async function copyResult() {
       const text = resultEl.textContent;
       if (!text || text === "-") return;
@@ -164,21 +235,18 @@
       try {
         await navigator.clipboard.writeText(text);
         setStatus("Copied to clipboard.");
-      } catch (e) {
-        // Fallback if clipboard API is blocked
-        setStatus("Copy failed (iOS sometimes blocks clipboard). You can tap and hold to select text.");
+      } catch {
+        setStatus("Copy failed. You can tap and hold to select text.");
       }
     }
 
-    // Wire up buttons
     startBtn.addEventListener("click", startScanning);
+    testBtn.addEventListener("click", startCameraPreviewOnly);
+    diagBtn.addEventListener("click", runDiagnostics);
     stopBtn.addEventListener("click", stopScanning);
     copyBtn.addEventListener("click", copyResult);
-
-    // Safety: stop camera when leaving the page
     window.addEventListener("pagehide", stopScanning);
 
-    // Register service worker for offline shell caching
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("service-worker.js").catch((err) => {
@@ -186,6 +254,8 @@
         });
       });
     }
+
+    runDiagnostics();
   </script>
 </body>
 </html>
