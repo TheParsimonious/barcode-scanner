@@ -599,11 +599,19 @@
       manualCtx.drawImage(videoEl, -vw / 2, -vh / 2, vw, vh);
       manualCtx.restore();
 
-      if (cropMode === "center-horizontal" || cropMode === "lane-horizontal") {
+      if (cropMode === "center-horizontal" || cropMode === "lane-horizontal" || cropMode === "lane-horizontal-narrow") {
         const bandPct = cropMode === "lane-horizontal" ? LANE_HEIGHT_PCT : 0.38;
         const topPct = cropMode === "lane-horizontal" ? LANE_TOP_PCT : (1 - bandPct) / 2;
         const band = Math.max(80, Math.floor(ch * bandPct));
         const y = Math.max(0, Math.min(ch - band, Math.floor(ch * topPct)));
+
+        if (cropMode === "lane-horizontal-narrow") {
+          const narrowW = Math.max(120, Math.floor(cw * 0.52));
+          const x = Math.max(0, Math.floor((cw - narrowW) / 2));
+          const imageData = manualCtx.getImageData(x, y, narrowW, band);
+          return { data: imageData.data, width: narrowW, height: band };
+        }
+
         const imageData = manualCtx.getImageData(0, y, cw, band);
         return { data: imageData.data, width: cw, height: band };
       }
@@ -654,7 +662,9 @@
 
       const horizontalPriority = angleDeg === 0 || angleDeg === 180;
       const preferredCrops = horizontalPriority
-        ? (linearOnlyMode ? ["lane-horizontal", "center-horizontal", "full"] : ["full", "center-horizontal", "center-vertical"])
+        ? (linearOnlyMode
+            ? ["lane-horizontal-narrow", "lane-horizontal", "center-horizontal", "full"]
+            : ["full", "center-horizontal", "center-vertical"])
         : ["center-vertical", "full", "center-horizontal"];
 
       for (const cropMode of preferredCrops) {
@@ -696,10 +706,12 @@
           const vh = videoEl.videoHeight;
           const laneY = Math.max(0, Math.floor(vh * LANE_TOP_PCT));
           const laneH = Math.max(80, Math.min(vh - laneY, Math.floor(vh * LANE_HEIGHT_PCT)));
-          nativeLaneCanvas.width = vw;
+          const laneW = Math.max(120, Math.floor(vw * 0.52));
+          const laneX = Math.max(0, Math.floor((vw - laneW) / 2));
+          nativeLaneCanvas.width = laneW;
           nativeLaneCanvas.height = laneH;
-          nativeLaneCtx.clearRect(0, 0, vw, laneH);
-          nativeLaneCtx.drawImage(videoEl, 0, laneY, vw, laneH, 0, 0, vw, laneH);
+          nativeLaneCtx.clearRect(0, 0, laneW, laneH);
+          nativeLaneCtx.drawImage(videoEl, laneX, laneY, laneW, laneH, 0, 0, laneW, laneH);
 
           const laneHits = await nativeDetector.detect(nativeLaneCanvas);
           if (laneHits && laneHits.length) {
