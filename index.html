@@ -28,7 +28,7 @@
   <h1>My Barcode Scanner (No Ads)</h1>
 
   <!-- Camera preview -->
-  <video id="preview" playsinline></video>
+  <video id="preview" playsinline autoplay muted></video>
 
   <div class="row">
     <button class="primary" id="startBtn">Start scanning</button>
@@ -68,37 +68,76 @@
       statusEl.textContent = msg;
     }
 
+    function formatCameraError(e) {
+      const name = e && e.name ? e.name : "UnknownError";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        return "Camera permission denied. Enable camera for this site in iPhone Settings > Safari > Camera, then reload.";
+      }
+      if (name === "NotFoundError" || name === "OverconstrainedError") {
+        return "No usable camera found with current settings. Try again or reload the page.";
+      }
+      if (name === "NotReadableError") {
+        return "Camera is in use by another app/tab. Close other camera apps and try again.";
+      }
+      return "Camera error. Make sure this page is HTTPS and camera access is allowed.";
+    }
+
+    async function startWithConstraints(constraints) {
+      return codeReader.decodeFromConstraints(constraints, videoEl, (result) => {
+        if (!result) return;
+        const text = result.getText();
+        resultEl.textContent = text;
+        copyBtn.disabled = false;
+        setStatus(`Scanned: ${result.getBarcodeFormat()}`);
+
+        if (navigator.vibrate) navigator.vibrate(60);
+      });
+    }
+
     // Start scanning
     async function startScanning() {
       try {
+        stopScanning();
+
+        if (!window.isSecureContext) {
+          setStatus("Camera requires HTTPS. Open your GitHub Pages URL (not a local file).");
+          return;
+        }
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus("This browser does not support camera access from web apps.");
+          return;
+        }
+
         setStatus("Requesting camera...");
 
-        // Start decoding from video device
-        controls = await codeReader.decodeFromVideoDevice(
-          null, // null lets ZXing choose; it usually picks back camera on iPhone
-          videoEl,
-          (result) => {
-            // This callback fires repeatedly while scanning
-            if (result) {
-              const text = result.getText();
-              resultEl.textContent = text;
-              copyBtn.disabled = false;
-              setStatus(`Scanned: ${result.getBarcodeFormat()}`);
+        // iPhone-safe fallback sequence: strict rear -> ideal rear -> any camera.
+        const attempts = [
+          { video: { facingMode: { exact: "environment" } }, audio: false },
+          { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+          { video: true, audio: false }
+        ];
 
-              // Optional: vibration feedback if supported
-              if (navigator.vibrate) navigator.vibrate(60);
-
-              // Optional: stop after first successful scan
-              // stopScanning();
-            }
+        let lastError = null;
+        for (const constraints of attempts) {
+          try {
+            controls = await startWithConstraints(constraints);
+            break;
+          } catch (e) {
+            lastError = e;
           }
-        );
+        }
+
+        if (!controls) {
+          throw lastError || new Error("Unable to start scanner");
+        }
 
         setRunning(true);
         setStatus("Scanning... point camera at barcode/QR.");
       } catch (e) {
         console.error(e);
-        setStatus("Camera error. Make sure you opened this over HTTPS and allowed camera access.");
+        setRunning(false);
+        setStatus(formatCameraError(e));
       }
     }
 
@@ -109,6 +148,7 @@
           controls.stop(); // Stops camera + scanning loop
           controls = null;
         }
+        codeReader.reset();
       } catch (e) {
         console.warn(e);
       }
