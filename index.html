@@ -30,8 +30,6 @@
 
   <div class="row">
     <button class="primary" id="startBtn">Start scanning</button>
-    <button class="secondary" id="testBtn">Test camera only</button>
-    <button class="secondary" id="diagBtn">Run diagnostics</button>
     <button class="secondary" id="stopBtn" disabled>Stop</button>
     <button class="secondary" id="copyBtn" disabled>Copy result</button>
   </div>
@@ -42,11 +40,6 @@
     <div id="status" class="small">Tip: use good light and hold steady.</div>
   </div>
 
-  <div class="box">
-    <div><strong>Diagnostics:</strong></div>
-    <pre id="diag" class="mono small">Tap "Run diagnostics".</pre>
-  </div>
-
   <script>
     const ZXING_CDNS = [
       "https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0",
@@ -55,13 +48,10 @@
 
     const videoEl = document.getElementById("preview");
     const startBtn = document.getElementById("startBtn");
-    const testBtn = document.getElementById("testBtn");
-    const diagBtn = document.getElementById("diagBtn");
     const stopBtn = document.getElementById("stopBtn");
     const copyBtn = document.getElementById("copyBtn");
     const resultEl = document.getElementById("result");
     const statusEl = document.getElementById("status");
-    const diagEl = document.getElementById("diag");
 
     let codeReader = null;
     let controls = null;
@@ -70,20 +60,11 @@
 
     function setRunning(running) {
       startBtn.disabled = running;
-      testBtn.disabled = running;
       stopBtn.disabled = !running;
     }
 
     function setStatus(msg) {
       statusEl.textContent = msg;
-    }
-
-    function setDiag(lines) {
-      diagEl.textContent = lines.join("\n");
-    }
-
-    function appendDiag(line) {
-      diagEl.textContent = `${diagEl.textContent}\n${line}`;
     }
 
     function loadScript(src) {
@@ -116,14 +97,10 @@
         zxingLoadPromise = (async () => {
           for (const src of ZXING_CDNS) {
             try {
-              appendDiag(`Trying ZXing: ${src}`);
               await loadScript(src);
-              if (window.ZXing && window.ZXing.BrowserMultiFormatReader) {
-                appendDiag(`ZXing source: ${src}`);
-                return true;
-              }
+              if (window.ZXing && window.ZXing.BrowserMultiFormatReader) return true;
             } catch (e) {
-              appendDiag(`ZXing load failed: ${src}`);
+              // Try next CDN.
             }
           }
           return false;
@@ -132,7 +109,7 @@
 
       const loaded = await zxingLoadPromise;
       if (!loaded || !window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
-        setStatus("Scanner library failed to load from CDN. Camera preview can still work.");
+        setStatus("Scanner library failed to load. Check connection and try again.");
         return false;
       }
 
@@ -143,7 +120,7 @@
     function formatCameraError(e) {
       const name = e && e.name ? e.name : "UnknownError";
       if (name === "NotAllowedError" || name === "SecurityError") {
-        return "Permission denied or blocked. In Safari, tap aA > Website Settings > Camera > Allow, then reload.";
+        return "Camera permission denied. In Safari: aA > Website Settings > Camera > Allow.";
       }
       if (name === "NotFoundError" || name === "OverconstrainedError") {
         return "No usable camera found with current settings.";
@@ -152,44 +129,6 @@
         return "Camera is already in use by another app/tab.";
       }
       return `Camera error: ${name}`;
-    }
-
-    async function runDiagnostics() {
-      const lines = [];
-      lines.push(`URL: ${location.href}`);
-      lines.push(`secureContext: ${window.isSecureContext}`);
-      lines.push(`protocol: ${location.protocol}`);
-      lines.push(`standalone(matchMedia): ${window.matchMedia("(display-mode: standalone)").matches}`);
-      lines.push(`standalone(iOS): ${navigator.standalone === true}`);
-      lines.push(`mediaDevices: ${!!navigator.mediaDevices}`);
-      lines.push(`getUserMedia: ${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}`);
-      lines.push(`permissionsAPI: ${!!navigator.permissions}`);
-      lines.push(`ZXingLoaded: ${!!(window.ZXing && window.ZXing.BrowserMultiFormatReader)}`);
-
-      if (navigator.permissions && navigator.permissions.query) {
-        try {
-          const p = await navigator.permissions.query({ name: "camera" });
-          lines.push(`cameraPermissionState: ${p.state}`);
-        } catch {
-          lines.push("cameraPermissionState: unsupported");
-        }
-      }
-
-      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const cams = devices.filter((d) => d.kind === "videoinput");
-          lines.push(`videoInputs: ${cams.length}`);
-          for (let i = 0; i < cams.length; i += 1) {
-            const label = cams[i].label || "(label hidden until permission granted)";
-            lines.push(`- cam${i + 1}: ${label}`);
-          }
-        } catch (e) {
-          lines.push(`enumerateDevicesError: ${e.name || "unknown"}`);
-        }
-      }
-
-      setDiag(lines);
     }
 
     async function getCameraStream() {
@@ -208,70 +147,6 @@
         }
       }
       throw lastError || new Error("Unable to access camera");
-    }
-
-    async function startCameraPreviewOnly() {
-      try {
-        stopScanning();
-
-        if (!window.isSecureContext) {
-          setStatus("Camera requires HTTPS. Open your GitHub Pages URL.");
-          return;
-        }
-
-        setStatus("Requesting camera for preview...");
-        activeStream = await getCameraStream();
-        videoEl.srcObject = activeStream;
-        await videoEl.play();
-
-        setRunning(true);
-        setStatus("Camera preview active (no scanning). If this works, issue is in scanner library loading.");
-        runDiagnostics();
-      } catch (e) {
-        console.error(e);
-        setRunning(false);
-        setStatus(formatCameraError(e));
-        runDiagnostics();
-      }
-    }
-
-    async function startScanning() {
-      try {
-        stopScanning();
-
-        if (!window.isSecureContext) {
-          setStatus("Camera requires HTTPS. Open your GitHub Pages URL.");
-          return;
-        }
-
-        if (!(await ensureCodeReader())) {
-          runDiagnostics();
-          return;
-        }
-
-        setStatus("Requesting camera...");
-        activeStream = await getCameraStream();
-        videoEl.srcObject = activeStream;
-        await videoEl.play();
-
-        controls = await codeReader.decodeFromStream(activeStream, videoEl, (result) => {
-          if (!result) return;
-          const text = result.getText();
-          resultEl.textContent = text;
-          copyBtn.disabled = false;
-          setStatus(`Scanned: ${result.getBarcodeFormat()}`);
-          if (navigator.vibrate) navigator.vibrate(60);
-        });
-
-        setRunning(true);
-        setStatus("Scanning... point camera at barcode/QR.");
-        runDiagnostics();
-      } catch (e) {
-        console.error(e);
-        setRunning(false);
-        setStatus(formatCameraError(e));
-        runDiagnostics();
-      }
     }
 
     function stopTracks() {
@@ -299,6 +174,42 @@
       setStatus("Stopped.");
     }
 
+    async function startScanning() {
+      try {
+        stopScanning();
+
+        if (!window.isSecureContext) {
+          setStatus("Camera requires HTTPS. Open your GitHub Pages URL.");
+          return;
+        }
+
+        if (!(await ensureCodeReader())) {
+          return;
+        }
+
+        setStatus("Requesting camera...");
+        activeStream = await getCameraStream();
+        videoEl.srcObject = activeStream;
+        await videoEl.play();
+
+        controls = await codeReader.decodeFromStream(activeStream, videoEl, (result) => {
+          if (!result) return;
+          const text = result.getText();
+          resultEl.textContent = text;
+          copyBtn.disabled = false;
+          setStatus(`Scanned: ${result.getBarcodeFormat()}`);
+          if (navigator.vibrate) navigator.vibrate(60);
+        });
+
+        setRunning(true);
+        setStatus("Scanning... point camera at barcode/QR.");
+      } catch (e) {
+        console.error(e);
+        setRunning(false);
+        setStatus(formatCameraError(e));
+      }
+    }
+
     async function copyResult() {
       const text = resultEl.textContent;
       if (!text || text === "-") return;
@@ -311,18 +222,7 @@
       }
     }
 
-    window.addEventListener("error", (event) => {
-      appendDiag(`windowError: ${event.message}`);
-    });
-
-    window.addEventListener("unhandledrejection", (event) => {
-      const msg = event.reason && event.reason.message ? event.reason.message : String(event.reason);
-      appendDiag(`promiseRejection: ${msg}`);
-    });
-
     startBtn.addEventListener("click", startScanning);
-    testBtn.addEventListener("click", startCameraPreviewOnly);
-    diagBtn.addEventListener("click", runDiagnostics);
     stopBtn.addEventListener("click", stopScanning);
     copyBtn.addEventListener("click", copyResult);
     window.addEventListener("pagehide", stopScanning);
@@ -330,12 +230,10 @@
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("service-worker.js").catch((err) => {
-          appendDiag(`serviceWorkerError: ${err.message || err}`);
+          console.warn("Service worker registration failed:", err);
         });
       });
     }
-
-    runDiagnostics();
   </script>
 </body>
 </html>
