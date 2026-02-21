@@ -1,4 +1,4 @@
-﻿const CACHE_NAME = "barcode-scanner-v10";
+﻿const CACHE_NAME = "barcode-scanner-v11";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -56,6 +56,7 @@ self.addEventListener("fetch", (event) => {
     })
   );
 });
+
 
 
 

@@ -87,6 +87,7 @@
     const cameraHelpEl = document.getElementById("cameraHelp");
 
     let codeReader = null;
+    let manualReader = null;
     let controls = null;
     let activeStream = null;
     let zxingLoadPromise = null;
@@ -96,6 +97,10 @@
     let activeVideoTrack = null;
     let zoomMin = 1;
     let zoomMax = 1;
+    let manualDecodeTimer = null;
+    let manualDecodeBusy = false;
+    const manualCanvas = document.createElement("canvas");
+    const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
 
     function setRunning(running) {
       startBtn.disabled = running;
@@ -215,6 +220,19 @@
       localStorage.removeItem(HISTORY_KEY);
       renderHistory();
       setStatus("History cleared.");
+    }
+
+    function handleScanResult(result) {
+      if (!result) return;
+      const text = result.getText();
+      const format = String(result.getBarcodeFormat());
+
+      resultEl.textContent = text;
+      copyBtn.disabled = false;
+      setStatus(`Scanned: ${format}`);
+      addHistoryItem(text, format);
+
+      if (navigator.vibrate) navigator.vibrate(60);
     }
 
     function setZoomUi(value) {
@@ -353,7 +371,7 @@
     }
 
     async function ensureCodeReader() {
-      if (codeReader) return true;
+      if (codeReader && manualReader) return true;
 
       if (!zxingLoadPromise) {
         zxingLoadPromise = (async () => {
@@ -375,7 +393,10 @@
         return false;
       }
 
-      codeReader = new window.ZXing.BrowserMultiFormatReader(buildDecodeHints());
+      const hints = buildDecodeHints();
+      codeReader = new window.ZXing.BrowserMultiFormatReader(hints);
+      manualReader = new window.ZXing.MultiFormatReader();
+      manualReader.setHints(hints);
       return true;
     }
 
@@ -411,11 +432,80 @@
       throw lastError || new Error("Unable to access camera");
     }
 
+    function drawRotatedVideoFrame(angleDeg) {
+      if (!manualCtx || !videoEl.videoWidth || !videoEl.videoHeight) return null;
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      const swap = angleDeg === 90 || angleDeg === 270;
+      const cw = swap ? vh : vw;
+      const ch = swap ? vw : vh;
+
+      manualCanvas.width = cw;
+      manualCanvas.height = ch;
+      manualCtx.save();
+      manualCtx.clearRect(0, 0, cw, ch);
+      manualCtx.translate(cw / 2, ch / 2);
+      manualCtx.rotate((angleDeg * Math.PI) / 180);
+      manualCtx.drawImage(videoEl, -vw / 2, -vh / 2, vw, vh);
+      manualCtx.restore();
+
+      const imageData = manualCtx.getImageData(0, 0, cw, ch);
+      return { data: imageData.data, width: cw, height: ch };
+    }
+
+    function tryManualDecodeAtAngle(angleDeg) {
+      if (!manualReader) return null;
+      const frame = drawRotatedVideoFrame(angleDeg);
+      if (!frame) return null;
+
+      const luminanceSource = new window.ZXing.RGBLuminanceSource(frame.data, frame.width, frame.height);
+      const binaryBitmap = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(luminanceSource));
+      try {
+        return manualReader.decode(binaryBitmap);
+      } catch (e) {
+        return null;
+      } finally {
+        manualReader.reset();
+      }
+    }
+
+    async function runManualRotationAssist() {
+      if (!controls || !manualReader || manualDecodeBusy || !activeStream) return;
+      if (!videoEl.videoWidth || !videoEl.videoHeight) return;
+
+      manualDecodeBusy = true;
+      try {
+        const angles = [0, 90, 180, 270];
+        for (const angle of angles) {
+          const result = tryManualDecodeAtAngle(angle);
+          if (result) {
+            handleScanResult(result);
+            break;
+          }
+        }
+      } finally {
+        manualDecodeBusy = false;
+      }
+    }
+
+    function startManualRotationAssist() {
+      stopManualRotationAssist();
+      manualDecodeTimer = setInterval(runManualRotationAssist, 450);
+    }
+
+    function stopManualRotationAssist() {
+      if (!manualDecodeTimer) return;
+      clearInterval(manualDecodeTimer);
+      manualDecodeTimer = null;
+      manualDecodeBusy = false;
+    }
+
     function stopTracks() {
       if (activeStream) {
         activeStream.getTracks().forEach((t) => t.stop());
         activeStream = null;
       }
+      stopManualRotationAssist();
       videoEl.srcObject = null;
       resetCameraControls();
     }
@@ -458,18 +548,11 @@
 
         controls = await codeReader.decodeFromStream(activeStream, videoEl, (result) => {
           if (!result) return;
-          const text = result.getText();
-          const format = String(result.getBarcodeFormat());
-
-          resultEl.textContent = text;
-          copyBtn.disabled = false;
-          setStatus(`Scanned: ${format}`);
-          addHistoryItem(text, format);
-
-          if (navigator.vibrate) navigator.vibrate(60);
+          handleScanResult(result);
         });
 
         setRunning(true);
+        startManualRotationAssist();
         setStatus("Scanning... point camera at barcode/QR.");
       } catch (e) {
         console.error(e);
