@@ -1,0 +1,151 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0a84ff" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Barcode Scanner" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <title>My Barcode Scanner</title>
+  <style>
+    /* Basic, clean layout */
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+    h1 { font-size: 18px; margin: 0 0 12px; }
+    video { width: 100%; max-width: 520px; border-radius: 12px; background: #111; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    button { padding: 10px 12px; border-radius: 10px; border: 0; cursor: pointer; }
+    button.primary { background: #0a84ff; color: white; }
+    button.secondary { background: #e5e5ea; }
+    .box { margin-top: 12px; padding: 12px; border-radius: 12px; background: #f2f2f7; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+    .small { color: #555; font-size: 12px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>My Barcode Scanner (No Ads)</h1>
+
+  <!-- Camera preview -->
+  <video id="preview" playsinline></video>
+
+  <div class="row">
+    <button class="primary" id="startBtn">Start scanning</button>
+    <button class="secondary" id="stopBtn" disabled>Stop</button>
+    <button class="secondary" id="copyBtn" disabled>Copy result</button>
+  </div>
+
+  <div class="box">
+    <div><strong>Last scan:</strong></div>
+    <div id="result" class="mono">-</div>
+    <div id="status" class="small">Tip: use good light and hold steady.</div>
+  </div>
+
+  <!-- ZXing browser bundle -->
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0"></script>
+  <script>
+    // Elements
+    const videoEl = document.getElementById("preview");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn  = document.getElementById("stopBtn");
+    const copyBtn  = document.getElementById("copyBtn");
+    const resultEl = document.getElementById("result");
+    const statusEl = document.getElementById("status");
+
+    // ZXing setup
+    const codeReader = new ZXing.BrowserMultiFormatReader();
+    let controls = null; // Will hold the running scanner controls
+
+    // Helper: set UI states
+    function setRunning(running) {
+      startBtn.disabled = running;
+      stopBtn.disabled = !running;
+    }
+
+    // Helper: show status text
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    // Start scanning
+    async function startScanning() {
+      try {
+        setStatus("Requesting camera...");
+
+        // Start decoding from video device
+        controls = await codeReader.decodeFromVideoDevice(
+          null, // null lets ZXing choose; it usually picks back camera on iPhone
+          videoEl,
+          (result) => {
+            // This callback fires repeatedly while scanning
+            if (result) {
+              const text = result.getText();
+              resultEl.textContent = text;
+              copyBtn.disabled = false;
+              setStatus(`Scanned: ${result.getBarcodeFormat()}`);
+
+              // Optional: vibration feedback if supported
+              if (navigator.vibrate) navigator.vibrate(60);
+
+              // Optional: stop after first successful scan
+              // stopScanning();
+            }
+          }
+        );
+
+        setRunning(true);
+        setStatus("Scanning... point camera at barcode/QR.");
+      } catch (e) {
+        console.error(e);
+        setStatus("Camera error. Make sure you opened this over HTTPS and allowed camera access.");
+      }
+    }
+
+    // Stop scanning
+    function stopScanning() {
+      try {
+        if (controls) {
+          controls.stop(); // Stops camera + scanning loop
+          controls = null;
+        }
+      } catch (e) {
+        console.warn(e);
+      }
+      setRunning(false);
+      setStatus("Stopped.");
+    }
+
+    // Copy result
+    async function copyResult() {
+      const text = resultEl.textContent;
+      if (!text || text === "-") return;
+
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus("Copied to clipboard.");
+      } catch (e) {
+        // Fallback if clipboard API is blocked
+        setStatus("Copy failed (iOS sometimes blocks clipboard). You can tap and hold to select text.");
+      }
+    }
+
+    // Wire up buttons
+    startBtn.addEventListener("click", startScanning);
+    stopBtn.addEventListener("click", stopScanning);
+    copyBtn.addEventListener("click", copyResult);
+
+    // Safety: stop camera when leaving the page
+    window.addEventListener("pagehide", stopScanning);
+
+    // Register service worker for offline shell caching
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("service-worker.js").catch((err) => {
+          console.warn("Service worker registration failed:", err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
