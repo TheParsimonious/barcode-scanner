@@ -103,6 +103,10 @@
     let manualDecodeTimer = null;
     let manualDecodeBusy = false;
     let linearOnlyMode = true;
+    let nativeDetector = null;
+    let nativeDetectTimer = null;
+    let nativeDetectBusy = false;
+    let nativeFormatsKey = "";
     const manualCanvas = document.createElement("canvas");
     const manualCtx = manualCanvas.getContext("2d", { willReadFrequently: true });
 
@@ -251,6 +255,15 @@
       setStatus(`Scanned: ${format}`);
       addHistoryItem(text, format);
 
+      if (navigator.vibrate) navigator.vibrate(60);
+    }
+
+    function handleScanValue(text, format) {
+      if (!text) return;
+      resultEl.textContent = text;
+      copyBtn.disabled = false;
+      setStatus(`Scanned: ${format || "UNKNOWN"}`);
+      addHistoryItem(text, format || "UNKNOWN");
       if (navigator.vibrate) navigator.vibrate(60);
     }
 
@@ -411,6 +424,46 @@
 
     function getActivePrimaryHints() {
       return linearOnlyMode ? buildLinearDecodeHints() : buildGeneralDecodeHints();
+    }
+
+    function getPreferredNativeFormats() {
+      const linear = [
+        "code_128",
+        "code_39",
+        "code_93",
+        "codabar",
+        "ean_13",
+        "ean_8",
+        "itf",
+        "upc_a",
+        "upc_e"
+      ];
+      if (linearOnlyMode) return linear;
+      return linear.concat(["qr_code", "data_matrix", "aztec", "pdf417"]);
+    }
+
+    async function ensureNativeDetector() {
+      if (!("BarcodeDetector" in window)) return false;
+      const desired = getPreferredNativeFormats();
+      const modeKey = desired.join(",");
+      if (nativeDetector && nativeFormatsKey === modeKey) return true;
+
+      try {
+        let supported = desired;
+        if (typeof window.BarcodeDetector.getSupportedFormats === "function") {
+          const sup = await window.BarcodeDetector.getSupportedFormats();
+          supported = desired.filter((f) => sup.includes(f));
+        }
+        if (!supported.length) return false;
+        nativeDetector = new window.BarcodeDetector({ formats: supported });
+        nativeFormatsKey = modeKey;
+        return true;
+      } catch (e) {
+        console.warn("Native BarcodeDetector unavailable", e);
+        nativeDetector = null;
+        nativeFormatsKey = "";
+        return false;
+      }
     }
 
     async function ensureCodeReader() {
@@ -582,6 +635,23 @@
       }
     }
 
+    async function runNativeDetectAssist() {
+      if (!nativeDetector || nativeDetectBusy || !activeStream) return;
+      if (!videoEl.videoWidth || !videoEl.videoHeight) return;
+      nativeDetectBusy = true;
+      try {
+        const hits = await nativeDetector.detect(videoEl);
+        if (hits && hits.length) {
+          const first = hits[0];
+          handleScanValue(first.rawValue, String(first.format || "NATIVE"));
+        }
+      } catch (e) {
+        console.warn("Native detect pass failed", e);
+      } finally {
+        nativeDetectBusy = false;
+      }
+    }
+
     function startManualRotationAssist() {
       stopManualRotationAssist();
       manualDecodeTimer = setInterval(runManualRotationAssist, 280);
@@ -594,11 +664,26 @@
       manualDecodeBusy = false;
     }
 
+    async function startNativeDetectAssist() {
+      stopNativeDetectAssist();
+      if (!(await ensureNativeDetector())) return false;
+      nativeDetectTimer = setInterval(runNativeDetectAssist, 180);
+      return true;
+    }
+
+    function stopNativeDetectAssist() {
+      if (!nativeDetectTimer) return;
+      clearInterval(nativeDetectTimer);
+      nativeDetectTimer = null;
+      nativeDetectBusy = false;
+    }
+
     function stopTracks() {
       if (activeStream) {
         activeStream.getTracks().forEach((t) => t.stop());
         activeStream = null;
       }
+      stopNativeDetectAssist();
       stopManualRotationAssist();
       videoEl.srcObject = null;
       resetCameraControls();
@@ -646,7 +731,17 @@
         });
 
         setRunning(true);
-        startManualRotationAssist();
+        const nativeStarted = await startNativeDetectAssist();
+        if (!nativeStarted) {
+          startManualRotationAssist();
+        } else {
+          // Keep manual assist as backup, but at lower cadence when native detector is active.
+          startManualRotationAssist();
+          if (manualDecodeTimer) {
+            clearInterval(manualDecodeTimer);
+            manualDecodeTimer = setInterval(runManualRotationAssist, 520);
+          }
+        }
         setStatus("Scanning... point camera at barcode/QR.");
       } catch (e) {
         console.error(e);
