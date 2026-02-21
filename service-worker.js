@@ -1,4 +1,4 @@
-﻿const CACHE_NAME = "barcode-scanner-v4";
+﻿const CACHE_NAME = "barcode-scanner-v5";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -28,19 +28,31 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
 
+  const req = event.request;
+  const reqUrl = new URL(req.url);
+
+  // Do not rewrite third-party requests; let browser/network handle those directly.
+  if (reqUrl.origin !== self.location.origin) {
+    event.respondWith(fetch(req));
+    return;
+  }
+
   event.respondWith(
-    caches.match(event.request).then((cached) => {
+    caches.match(req).then((cached) => {
+      const networkFetch = fetch(req).then((response) => {
+        const cloned = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(req, cloned));
+        return response;
+      });
+
       if (cached) return cached;
-      return fetch(event.request)
-        .then((response) => {
-          const cloned = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, cloned));
-          return response;
-        })
-        .catch(() => caches.match("./index.html"));
+
+      return networkFetch.catch(() => {
+        if (req.mode === "navigate") {
+          return caches.match("./index.html");
+        }
+        throw new Error("Request failed and not cached");
+      });
     })
   );
 });
-
-
-

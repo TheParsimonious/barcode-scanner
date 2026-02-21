@@ -47,8 +47,12 @@
     <pre id="diag" class="mono small">Tap "Run diagnostics".</pre>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0"></script>
   <script>
+    const ZXING_CDNS = [
+      "https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0",
+      "https://unpkg.com/@zxing/library@0.20.0"
+    ];
+
     const videoEl = document.getElementById("preview");
     const startBtn = document.getElementById("startBtn");
     const testBtn = document.getElementById("testBtn");
@@ -62,6 +66,7 @@
     let codeReader = null;
     let controls = null;
     let activeStream = null;
+    let zxingLoadPromise = null;
 
     function setRunning(running) {
       startBtn.disabled = running;
@@ -81,13 +86,56 @@
       diagEl.textContent = `${diagEl.textContent}\n${line}`;
     }
 
-    function ensureCodeReader() {
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[data-src='${src}']`);
+        if (existing) {
+          if (window.ZXing && window.ZXing.BrowserMultiFormatReader) {
+            resolve();
+            return;
+          }
+          existing.addEventListener("load", () => resolve(), { once: true });
+          existing.addEventListener("error", () => reject(new Error(`Failed: ${src}`)), { once: true });
+          return;
+        }
+
+        const s = document.createElement("script");
+        s.src = src;
+        s.async = true;
+        s.dataset.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error(`Failed: ${src}`));
+        document.head.appendChild(s);
+      });
+    }
+
+    async function ensureCodeReader() {
       if (codeReader) return true;
-      if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
-        setStatus("Scanner library failed to load. Check connection, then reload page.");
-        appendDiag("ZXingLoaded: false");
+
+      if (!zxingLoadPromise) {
+        zxingLoadPromise = (async () => {
+          for (const src of ZXING_CDNS) {
+            try {
+              appendDiag(`Trying ZXing: ${src}`);
+              await loadScript(src);
+              if (window.ZXing && window.ZXing.BrowserMultiFormatReader) {
+                appendDiag(`ZXing source: ${src}`);
+                return true;
+              }
+            } catch (e) {
+              appendDiag(`ZXing load failed: ${src}`);
+            }
+          }
+          return false;
+        })();
+      }
+
+      const loaded = await zxingLoadPromise;
+      if (!loaded || !window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
+        setStatus("Scanner library failed to load from CDN. Camera preview can still work.");
         return false;
       }
+
       codeReader = new window.ZXing.BrowserMultiFormatReader();
       return true;
     }
@@ -177,7 +225,7 @@
         await videoEl.play();
 
         setRunning(true);
-        setStatus("Camera preview active (no scanning). If this works, issue is in scanner layer.");
+        setStatus("Camera preview active (no scanning). If this works, issue is in scanner library loading.");
         runDiagnostics();
       } catch (e) {
         console.error(e);
@@ -196,7 +244,7 @@
           return;
         }
 
-        if (!ensureCodeReader()) {
+        if (!(await ensureCodeReader())) {
           runDiagnostics();
           return;
         }
